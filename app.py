@@ -11,6 +11,7 @@ import streamlit as st
 from sqlalchemy.exc import IntegrityError
 
 from src.analytics import build_exception_table, run_analytics
+from src.auth import require_password, render_logout_button
 from src.exporter import build_analysis_workbook
 from src.loader import load_monthly_workbook
 from src.reference_io import references_to_excel
@@ -27,7 +28,103 @@ from src.storage import (
 
 APP_TITLE = "ERAU Energy Dashboard"
 
-st.set_page_config(page_title=APP_TITLE, page_icon="⚡", layout="wide")
+st.set_page_config(
+    page_title=APP_TITLE,
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
+def inject_responsive_css():
+    """Small CSS layer for better use of laptop/tablet widths.
+
+    The layout itself stays responsive through Streamlit containers; this only
+    adjusts padding, sidebar width, and metric typography at narrower widths.
+    """
+    st.markdown(
+        """
+        <style>
+        /* Let the dashboard use the viewport instead of a narrow centered block. */
+        .block-container {
+            max-width: 100%;
+            padding-top: 1.25rem;
+            padding-bottom: 2rem;
+            padding-left: clamp(0.8rem, 2.0vw, 2.25rem);
+            padding-right: clamp(0.8rem, 2.0vw, 2.25rem);
+        }
+
+        /* The default sidebar can consume too much of a 1366px laptop screen. */
+        [data-testid="stSidebar"] {
+            min-width: 16rem !important;
+            width: clamp(16rem, 22vw, 19rem) !important;
+        }
+        [data-testid="stSidebar"] > div:first-child {
+            width: 100% !important;
+        }
+
+        /* Keep KPI values legible without forcing oversized text. */
+        [data-testid="stMetric"] {
+            min-width: 0;
+        }
+        [data-testid="stMetricLabel"] p {
+            white-space: normal;
+            line-height: 1.15;
+            font-size: clamp(0.78rem, 0.9vw, 0.95rem);
+        }
+        [data-testid="stMetricValue"] {
+            font-size: clamp(1.35rem, 2.0vw, 2rem);
+            line-height: 1.1;
+        }
+
+        /* Slightly tighten the UI on smaller laptops/tablets. */
+        @media (max-width: 1100px) {
+            .block-container {
+                padding-left: 0.75rem;
+                padding-right: 0.75rem;
+            }
+            [data-testid="stSidebar"] {
+                min-width: 15rem !important;
+                width: 15rem !important;
+            }
+        }
+
+        @media (max-width: 800px) {
+            [data-testid="stMetricValue"] {
+                font-size: 1.35rem;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def metric_grid(items, columns: int = 3):
+    """Render KPI cards in short rows so they do not clip on laptops.
+
+    items is an iterable of (label, value, delta) tuples.
+    """
+    items = list(items)
+    for start in range(0, len(items), columns):
+        row = items[start:start + columns]
+        cols = st.columns(len(row), gap="small")
+        for col, (label, value, delta) in zip(cols, row):
+            col.metric(label, value, delta)
+
+
+def show_plotly(fig, *, height: int | None = None):
+    """Apply compact responsive defaults to Plotly charts."""
+    fig.update_layout(
+        autosize=True,
+        margin=dict(l=12, r=12, t=52, b=18),
+        height=height,
+    )
+    st.plotly_chart(fig, width="stretch")
+
+
+def show_dataframe(df: pd.DataFrame, *, height="auto"):
+    st.dataframe(df, width="stretch", height=height, hide_index=True)
 
 
 def secret_or_env(name: str, default: str | None = None) -> str | None:
@@ -88,18 +185,25 @@ def refresh_references():
 
 
 def metric_card_row(latest: pd.Series | None, campus: pd.DataFrame):
-    cols = st.columns(6)
     if latest is None:
-        for col, label in zip(cols, ["Month Cost", "Month kWh", "Effective $/kWh", "MoM Cost", "MoM Usage", "Buildings"]):
-            col.metric(label, "—")
+        metric_grid([
+            ("Month Cost", "—", None),
+            ("Month kWh", "—", None),
+            ("Rolling 12M Cost", "—", None),
+            ("Rolling 12M kWh", "—", None),
+            ("Rolling 12M Electric EUI", "—", None),
+            ("Buildings Represented", "—", None),
+        ])
         return
 
-    cols[0].metric("Month Cost", currency(latest.get("cost")), pct(latest.get("costChangePct")))
-    cols[1].metric("Month kWh", number(latest.get("kWh")), pct(latest.get("kWhChangePct")))
-    cols[2].metric("Rolling 12M Cost", currency(latest.get("rolling12Cost")))
-    cols[3].metric("Rolling 12M kWh", number(latest.get("rolling12KWh")))
-    cols[4].metric("Rolling 12M Electric EUI", number(latest.get("rolling12ElectricEUI"), 1))
-    cols[5].metric("Buildings Represented", int(latest.get("buildingCount", 0)))
+    metric_grid([
+        ("Month Cost", currency(latest.get("cost")), pct(latest.get("costChangePct"))),
+        ("Month kWh", number(latest.get("kWh")), pct(latest.get("kWhChangePct"))),
+        ("Rolling 12M Cost", currency(latest.get("rolling12Cost")), None),
+        ("Rolling 12M kWh", number(latest.get("rolling12KWh")), None),
+        ("Rolling 12M Electric EUI", number(latest.get("rolling12ElectricEUI"), 1), None),
+        ("Buildings Represented", str(int(latest.get("buildingCount", 0))), None),
+    ])
 
 
 def render_overview(bundle):
@@ -125,11 +229,11 @@ def render_overview(bundle):
     with c1:
         fig = px.line(campus, x="billMonth", y="cost", markers=True, title="Monthly Electricity Cost")
         fig.update_yaxes(tickprefix="$", separatethousands=True)
-        st.plotly_chart(fig, use_container_width=True)
+        show_plotly(fig)
     with c2:
         fig = px.line(campus, x="billMonth", y="kWh", markers=True, title="Monthly Electricity Use")
         fig.update_yaxes(separatethousands=True)
-        st.plotly_chart(fig, use_container_width=True)
+        show_plotly(fig)
 
     snapshot = bundle.building_snapshot
     if not snapshot.empty:
@@ -143,14 +247,14 @@ def render_overview(bundle):
             title="Top 10 Buildings by Rolling 12-Month Electricity Cost",
         )
         fig.update_xaxes(tickprefix="$", separatethousands=True)
-        st.plotly_chart(fig, use_container_width=True)
+        show_plotly(fig)
 
         st.subheader("Latest Building Snapshot")
         columns = [
             "building_id", "facility_name", "use_type", "area_sqft", "rolling12KWh", "rolling12Cost",
             "rolling12ElectricEUI", "rolling12CostPerSF", "effectiveCostPerKWh", "peerRank",
         ]
-        st.dataframe(snapshot[[c for c in columns if c in snapshot.columns]], use_container_width=True, hide_index=True)
+        show_dataframe(snapshot[[c for c in columns if c in snapshot.columns]], height=360)
 
 
 def render_cost_usage(bundle):
@@ -184,7 +288,7 @@ def render_cost_usage(bundle):
         yaxis2=dict(title="kWh", overlaying="y", side="right"),
         legend=dict(orientation="h"),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    show_plotly(fig)
 
     latest = monthly.sort_values(["building_id", "billMonth"]).groupby("building_id", as_index=False).tail(1)
     latest = latest.dropna(subset=["costChangePct", "kWhChangePct"])
@@ -202,7 +306,7 @@ def render_cost_usage(bundle):
         fig.add_vline(x=0)
         fig.update_xaxes(tickformat=".0%", title="Usage change vs prior bill month")
         fig.update_yaxes(tickformat=".0%", title="Cost change vs prior bill month")
-        st.plotly_chart(fig, use_container_width=True)
+        show_plotly(fig)
 
     st.subheader("Rate Schedule Summary")
     allocated = bundle.allocated_bills.copy()
@@ -213,7 +317,7 @@ def render_cost_usage(bundle):
             .reset_index()
         )
         rate_summary["effectiveCostPerKWh"] = rate_summary["cost"] / rate_summary["kWh"].where(rate_summary["kWh"] > 0)
-        st.dataframe(rate_summary.sort_values("cost", ascending=False), use_container_width=True, hide_index=True)
+        show_dataframe(rate_summary.sort_values("cost", ascending=False), height=360)
 
 
 def render_eui(bundle):
@@ -238,23 +342,24 @@ def render_eui(bundle):
             hover_data=["facility_name", "use_type", "area_sqft", "rolling12KWh", "rolling12Cost", "rolling12Complete"],
             title="Rolling 12-Month Electric EUI (kBtu/sf/year)",
         )
-        st.plotly_chart(fig, use_container_width=True)
+        show_plotly(fig)
 
     st.subheader("Building Detail")
     choices = sorted(snapshot["building_id"].dropna().unique().tolist())
     selected = st.selectbox("Select building", choices, key="eui_building")
     row = snapshot[snapshot["building_id"].eq(selected)].iloc[0]
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Area", number(row.get("area_sqft")) + " sf" if pd.notna(row.get("area_sqft")) else "—")
-    c2.metric("Rolling 12M kWh", number(row.get("rolling12KWh")))
-    c3.metric("Rolling 12M Cost", currency(row.get("rolling12Cost")))
-    c4.metric("Electric EUI", number(row.get("rolling12ElectricEUI"), 1))
-    c5.metric("Cost / sf", f"${row.get('rolling12CostPerSF'):.2f}" if pd.notna(row.get("rolling12CostPerSF")) else "—")
+    metric_grid([
+        ("Area", number(row.get("area_sqft")) + " sf" if pd.notna(row.get("area_sqft")) else "—", None),
+        ("Rolling 12M kWh", number(row.get("rolling12KWh")), None),
+        ("Rolling 12M Cost", currency(row.get("rolling12Cost")), None),
+        ("Electric EUI", number(row.get("rolling12ElectricEUI"), 1), None),
+        ("Cost / sf", f"${row.get('rolling12CostPerSF'):.2f}" if pd.notna(row.get("rolling12CostPerSF")) else "—", None),
+    ])
     st.caption("Electric EUI is electricity-only site energy intensity: kWh × 3.412 ÷ gross floor area. Special energy facilities are separated from normal-building peer rankings.")
 
     detail = bundle.building_monthly[bundle.building_monthly["building_id"].eq(selected)]
     fig = px.line(detail, x="billMonth", y="electricEUI", markers=True, title="Monthly Electric EUI")
-    st.plotly_chart(fig, use_container_width=True)
+    show_plotly(fig)
 
 
 def render_variance(bundle):
@@ -272,7 +377,7 @@ def render_variance(bundle):
     if exceptions.empty:
         st.success("No latest-period building exceptions exceeded the selected thresholds.")
     else:
-        st.dataframe(exceptions, use_container_width=True, hide_index=True)
+        show_dataframe(exceptions, height=360)
 
     st.subheader("Account-Level Bill Variance")
     cols = [
@@ -281,35 +386,36 @@ def render_variance(bundle):
         "kWh", "previousKWh", "kWhChange", "kWhChangePct", "kWhPerDayChangePct", "costPerDayChangePct",
     ]
     latest_accounts = bundle.bills.sort_values(["accountNumber", "dateBilled"]).groupby("accountNumber", as_index=False).tail(1)
-    st.dataframe(latest_accounts[[c for c in cols if c in latest_accounts.columns]], use_container_width=True, hide_index=True)
+    show_dataframe(latest_accounts[[c for c in cols if c in latest_accounts.columns]], height=420)
 
 
 def render_data_quality(bundle):
     st.title("Data Quality")
     bills = bundle.bills
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Bill rows", len(bills))
-    c2.metric("Accounts", bills["accountNumber"].nunique())
-    c3.metric("Meters in history", bills["fullMeterID"].replace("", pd.NA).nunique())
-    c4.metric("Unmapped meters", bundle.unmapped_meters["fullMeterID"].nunique() if not bundle.unmapped_meters.empty else 0)
+    metric_grid([
+        ("Bill rows", f"{len(bills):,}", None),
+        ("Accounts", str(bills["accountNumber"].nunique()), None),
+        ("Meters in history", str(bills["fullMeterID"].replace("", pd.NA).nunique()), None),
+        ("Unmapped meters", str(bundle.unmapped_meters["fullMeterID"].nunique() if not bundle.unmapped_meters.empty else 0), None),
+    ], columns=2)
 
     if not bundle.unmapped_meters.empty:
         st.subheader("Unmapped FPL Meters")
-        st.dataframe(bundle.unmapped_meters, use_container_width=True, hide_index=True)
+        show_dataframe(bundle.unmapped_meters, height=320)
 
     if not bundle.meter_suggestions.empty:
         st.subheader("Suggested New Meter Mappings")
         st.caption("Suggestions are not applied automatically. Confirm them in Reference Data before they affect EUI.")
-        st.dataframe(bundle.meter_suggestions, use_container_width=True, hide_index=True)
+        show_dataframe(bundle.meter_suggestions, height=320)
 
     if not bundle.shared_meter_issues.empty:
         st.subheader("Shared Meter Allocation Issues")
         st.warning("These meter mappings are excluded from building EUI until all building allocations are populated and sum to 100%.")
-        st.dataframe(bundle.shared_meter_issues, use_container_width=True, hide_index=True)
+        show_dataframe(bundle.shared_meter_issues, height=320)
 
     if not bundle.missing_area.empty:
         st.subheader("Buildings Missing Floor Area")
-        st.dataframe(bundle.missing_area, use_container_width=True, hide_index=True)
+        show_dataframe(bundle.missing_area, height=320)
 
     missing_kwh = bills[bills["kWh"].isna()]
     missing_cost = bills[bills["totalBillAmount"].isna()]
@@ -472,9 +578,9 @@ def render_reference_data(engine, buildings, meters, bundle=None):
     st.download_button("Download reference tables", data=ref_bytes, file_name="erau_energy_reference_tables.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     st.subheader("Current Buildings")
-    st.dataframe(buildings, use_container_width=True, hide_index=True)
+    show_dataframe(buildings, height=360)
     st.subheader("Current Meter Mappings")
-    st.dataframe(meters, use_container_width=True, hide_index=True)
+    show_dataframe(meters, height=360)
 
     if not admin_allowed():
         return
@@ -512,6 +618,8 @@ def render_downloads(bundle, buildings, meters):
 
 
 def main():
+    require_password()
+    inject_responsive_css()
     database_url = secret_or_env("DATABASE_URL")
     engine = database_engine(database_url)
     buildings = load_buildings(engine, include_inactive=True)
@@ -523,6 +631,7 @@ def main():
         "Dashboard",
         ["Overview", "Cost & Usage", "Building EUI", "Variance & Exceptions", "Data Quality", "Reference Data", "Downloads"],
     )
+    render_logout_button()
 
     bundle = None
     if uploaded is not None:

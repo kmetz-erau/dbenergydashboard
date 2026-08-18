@@ -196,3 +196,32 @@ pytest -q
 ```
 
 The tests cover meter-ID reconstruction, previous-bill variance, EUI math, and unmapped-meter handling.
+
+## Responsive layout
+
+The app uses a responsive dashboard layout for laptop, tablet, and narrow browser widths:
+
+- KPI cards are limited to three per row instead of six-wide rows.
+- Charts and dataframes use Streamlit stretch width.
+- Main content padding scales with the viewport.
+- The sidebar is capped on laptop screens so it does not consume excessive horizontal space.
+- KPI typography scales down at narrower breakpoints.
+
+If you customize the dashboard, prefer short `st.columns(...)` groups and avoid forcing five or six metrics into one row.
+
+
+## App password
+
+The entire dashboard is protected by a shared password. `APP_PASSWORD` is required.
+
+For local use, copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and set:
+
+```toml
+APP_PASSWORD = "your-strong-password"
+```
+
+Do **not** commit `.streamlit/secrets.toml`; it is already ignored by `.gitignore`.
+
+For Streamlit Community Cloud, open the deployed app settings and place `APP_PASSWORD` in the **Secrets** section. The app renders no workbook data, reference data, or dashboard navigation until the correct password is entered.
+
+`ADMIN_PASSWORD` remains optional and can be used as a second password specifically for adding/editing buildings and meters.
