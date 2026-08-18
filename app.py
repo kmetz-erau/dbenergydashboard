@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 from pathlib import Path
@@ -21,9 +22,11 @@ from src.storage import (
     get_engine,
     init_database,
     load_buildings,
+    load_demand_history,
     load_meters,
     update_building,
     update_meter,
+    upsert_demand_history,
 )
 
 APP_TITLE = "ERAU Energy Dashboard"
@@ -362,6 +365,167 @@ def render_eui(bundle):
     show_plotly(fig)
 
 
+
+def render_demand(bundle):
+    st.title("Demand Analytics")
+    monthly = bundle.building_demand_monthly.copy()
+    demand_history = bundle.demand_details.copy()
+
+    if monthly.empty:
+        if demand_history.empty:
+            st.info(
+                "No demand data is available yet. Upload an enhanced workbook containing "
+                "Selected Enriched or PDF Details with parsed bill PDFs."
+            )
+        else:
+            st.warning(
+                "Demand records were found, but none can be mapped to buildings yet. "
+                "Review the demand meter exceptions in Data Quality / Reference Data."
+            )
+        return
+
+    latest = bundle.building_demand_snapshot.copy()
+    latest_data_date = demand_history["dateBilled"].max() if not demand_history.empty else pd.NaT
+    latest_allocated = (
+        bundle.allocated_demand
+        .sort_values(["building_id", "fullMeterID", "dateBilled"])
+        .groupby(["building_id", "fullMeterID"], as_index=False)
+        .tail(1)
+        .copy()
+        if not bundle.allocated_demand.empty else pd.DataFrame()
+    )
+
+    total_peak = latest["billedPeakDemandKW"].sum(min_count=1)
+    largest_peak = latest["billedPeakDemandKW"].max()
+    total_demand_charge = latest["demandChargeAmount"].sum(min_count=1)
+    median_intensity = latest["demandIntensityWPerSF"].median()
+    estimated_rows = int(latest_allocated["demandChargeIsEstimated"].fillna(False).sum()) if not latest_allocated.empty else 0
+
+    if pd.notna(latest_data_date):
+        st.caption(f"Latest stored demand bill date: {latest_data_date:%B %d, %Y}. Building KPIs use each building's latest available demand bill month.")
+    metric_grid([
+        ("Buildings w/ Demand", f"{latest['building_id'].nunique():,}", None),
+        ("Sum of Billed Meter Peaks", f"{number(total_peak, 0)} kW", None),
+        ("Largest Building Peak", f"{number(largest_peak, 0)} kW", None),
+        ("Demand Charges", currency(total_demand_charge), None),
+        ("Median Demand Intensity", f"{number(median_intensity, 2)} W/sf", None),
+        ("Estimated Charge Rows", f"{estimated_rows:,}", None),
+    ])
+    st.info(
+        "For buildings with multiple meters, peak kW is the sum of each meter's billed peak. "
+        "It is not a coincident interval peak unless those meters peak at the same time. "
+        "Demand-charge dollars marked estimated are calculated from the bill's $/kW rates and billed kW."
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        top_peak = latest.dropna(subset=["billedPeakDemandKW"]).nlargest(15, "billedPeakDemandKW")
+        if not top_peak.empty:
+            fig = px.bar(
+                top_peak.sort_values("billedPeakDemandKW"),
+                x="billedPeakDemandKW",
+                y="building_id",
+                orientation="h",
+                hover_data=["facility_name", "use_type", "area_sqft", "demandIntensityWPerSF"],
+                title="Top Buildings by Billed Peak Demand",
+            )
+            fig.update_xaxes(title="Billed peak demand (kW)")
+            show_plotly(fig, height=500)
+    with c2:
+        top_intensity = latest.dropna(subset=["demandIntensityWPerSF"]).nlargest(15, "demandIntensityWPerSF")
+        if not top_intensity.empty:
+            fig = px.bar(
+                top_intensity.sort_values("demandIntensityWPerSF"),
+                x="demandIntensityWPerSF",
+                y="building_id",
+                orientation="h",
+                hover_data=["facility_name", "use_type", "area_sqft", "billedPeakDemandKW"],
+                title="Top Buildings by Demand Intensity",
+            )
+            fig.update_xaxes(title="Demand intensity (W/sf)")
+            show_plotly(fig, height=500)
+
+    st.subheader("Building Demand Detail")
+    building_choices = sorted(monthly["building_id"].dropna().unique().tolist())
+    selected = st.selectbox("Building", building_choices, key="demand_building")
+    detail = monthly[monthly["building_id"].eq(selected)].sort_values("billMonth").copy()
+    row = detail.iloc[-1]
+    metric_grid([
+        ("Billed Peak", f"{number(row.get('billedPeakDemandKW'), 1)} kW", pct(row.get("demandChangePct"))),
+        ("Previous Peak", f"{number(row.get('previousPeakDemandKW'), 1)} kW", None),
+        ("Maximum Demand", f"{number(row.get('maximumDemandKW'), 1)} kW", None),
+        ("On-Peak Demand", f"{number(row.get('onPeakDemandKW'), 1)} kW", None),
+        ("Demand Intensity", f"{number(row.get('demandIntensityWPerSF'), 2)} W/sf", pct(row.get("demandIntensityChangePct"))),
+        ("Demand Charge", currency(row.get("demandChargeAmount")), None),
+    ])
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=detail["billMonth"],
+        y=detail["billedPeakDemandKW"],
+        mode="lines+markers",
+        name="Billed peak kW",
+    ))
+    if detail["onPeakDemandKW"].notna().any():
+        fig.add_trace(go.Scatter(
+            x=detail["billMonth"],
+            y=detail["onPeakDemandKW"],
+            mode="lines+markers",
+            name="On-peak demand kW",
+        ))
+    if detail["maximumDemandKW"].notna().any():
+        fig.add_trace(go.Scatter(
+            x=detail["billMonth"],
+            y=detail["maximumDemandKW"],
+            mode="lines+markers",
+            name="Maximum demand kW",
+        ))
+    fig.update_layout(title=f"{selected} Demand History", yaxis_title="kW")
+    show_plotly(fig)
+
+    if detail["demandChargeAmount"].notna().any():
+        fig = px.bar(
+            detail,
+            x="billMonth",
+            y="demandChargeAmount",
+            title=f"{selected} Demand-Charge History",
+        )
+        fig.update_yaxes(tickprefix="$", separatethousands=True, title="Demand charge ($)")
+        show_plotly(fig)
+
+    st.subheader("Latest Meter-Level Demand")
+    if not latest_allocated.empty:
+        shown = latest_allocated.copy()
+        shown["rateSchedule"] = shown["referenceRateSchedule"].fillna(shown["rateScheduleBill"])
+        cols = [
+            "building_id", "facility_name", "fullMeterID", "accountNumber", "dateBilled",
+            "rateSchedule", "billedPeakDemandKW", "genericDemandKW", "onPeakDemandKW",
+            "maximumDemandKW", "demandChargePerKW", "maximumDemandChargePerKW",
+            "demandChargeAmount", "demandChargeIsEstimated",
+        ]
+        show_dataframe(shown[[c for c in cols if c in shown.columns]].sort_values("billedPeakDemandKW", ascending=False), height=420)
+
+        st.subheader("Rate Schedule Demand Summary")
+        rate_summary = (
+            shown.groupby("rateSchedule", dropna=False)
+            .agg(
+                meters=("fullMeterID", "nunique"),
+                buildings=("building_id", "nunique"),
+                summedBilledPeaksKW=("billedPeakDemandKW", lambda x: x.sum(min_count=1)),
+                demandChargeAmount=("demandChargeAmount", lambda x: x.sum(min_count=1)),
+            )
+            .reset_index()
+            .sort_values("summedBilledPeaksKW", ascending=False)
+        )
+        show_dataframe(rate_summary, height=320)
+
+    if detail["previousPeakDemandKW"].notna().sum() == 0:
+        st.caption(
+            "Prior-demand variance will populate automatically after at least two monthly demand uploads "
+            "have been stored in the dashboard database."
+        )
+
+
 def render_variance(bundle):
     st.title("Variance & Exceptions")
     c1, c2, c3 = st.columns(3)
@@ -397,11 +561,18 @@ def render_data_quality(bundle):
         ("Accounts", str(bills["accountNumber"].nunique()), None),
         ("Meters in history", str(bills["fullMeterID"].replace("", pd.NA).nunique()), None),
         ("Unmapped meters", str(bundle.unmapped_meters["fullMeterID"].nunique() if not bundle.unmapped_meters.empty else 0), None),
-    ], columns=2)
+        ("Stored demand rows", f"{len(bundle.demand_details):,}", None),
+        ("Unmapped demand meters", str(bundle.unmapped_demand_meters["fullMeterID"].nunique() if not bundle.unmapped_demand_meters.empty else 0), None),
+    ], columns=3)
 
     if not bundle.unmapped_meters.empty:
         st.subheader("Unmapped FPL Meters")
         show_dataframe(bundle.unmapped_meters, height=320)
+
+    if not bundle.unmapped_demand_meters.empty:
+        st.subheader("Unmapped Demand Meters")
+        st.caption("Demand rows on these meters are retained in history but excluded from building-demand KPIs until mapped.")
+        show_dataframe(bundle.unmapped_demand_meters, height=320)
 
     if not bundle.meter_suggestions.empty:
         st.subheader("Suggested New Meter Mappings")
@@ -610,6 +781,12 @@ def render_downloads(bundle, buildings, meters):
         mime="text/csv",
     )
     st.download_button(
+        "Download demand snapshot CSV",
+        data=bundle.building_demand_snapshot.to_csv(index=False).encode("utf-8"),
+        file_name="building_demand_snapshot.csv",
+        mime="text/csv",
+    )
+    st.download_button(
         "Download mapping exceptions CSV",
         data=bundle.unmapped_meters.to_csv(index=False).encode("utf-8"),
         file_name="unmapped_meters.csv",
@@ -629,7 +806,7 @@ def main():
     uploaded = st.sidebar.file_uploader("Upload monthly enhanced FPL workbook", type=["xlsx"])
     page = st.sidebar.radio(
         "Dashboard",
-        ["Overview", "Cost & Usage", "Building EUI", "Variance & Exceptions", "Data Quality", "Reference Data", "Downloads"],
+        ["Overview", "Cost & Usage", "Demand", "Building EUI", "Variance & Exceptions", "Data Quality", "Reference Data", "Downloads"],
     )
     render_logout_button()
 
@@ -638,9 +815,22 @@ def main():
         try:
             raw = uploaded.getvalue()
             result = load_monthly_workbook(raw, uploaded.name)
-            bundle = run_analytics(result.bills, buildings, meters)
+
+            # The enhanced workbook normally contains only the demand-bearing PDFs
+            # selected for the current run. Persist those normalized demand records
+            # so the dashboard builds month-over-month demand history over time.
+            upload_hash = hashlib.sha256(raw).hexdigest()
+            if not result.demand.empty and st.session_state.get("saved_demand_upload_hash") != upload_hash:
+                demand_save = upsert_demand_history(engine, result.demand, uploaded.name)
+                st.session_state["saved_demand_upload_hash"] = upload_hash
+                st.session_state["demand_save_stats"] = demand_save
+
+            demand_history = load_demand_history(engine)
+            bundle = run_analytics(result.bills, buildings, meters, demand_history)
             st.sidebar.success(f"Loaded {len(result.bills):,} bill rows")
             st.sidebar.caption(f"{result.bills['accountNumber'].nunique()} accounts · {result.bills['fullMeterID'].replace('', pd.NA).nunique()} meters")
+            if not result.demand.empty:
+                st.sidebar.caption(f"{len(result.demand):,} demand records extracted this upload")
         except Exception as exc:
             st.error(f"Could not process workbook: {exc}")
             bundle = None
@@ -659,8 +849,9 @@ def main():
             "1. Upload the latest enhanced FPL `.xlsx` file.\n"
             "2. The app validates Bill History and reconstructs FPL meter IDs.\n"
             "3. Meters map to buildings, square footage, utility and rate schedule.\n"
-            "4. The dashboard calculates cost, usage, variance, kWh/sf, $/sf and electric EUI.\n"
-            "5. New/unmapped meters are surfaced for review and can be added in Reference Data."
+            "4. The dashboard calculates cost, usage, demand, variance, kWh/sf, $/sf and electric EUI.\n"
+            "5. Demand records are retained so month-over-month peak-demand variance builds over time.\n"
+            "6. New/unmapped meters are surfaced for review and can be added in Reference Data."
         )
         return
 
@@ -668,6 +859,8 @@ def main():
         render_overview(bundle)
     elif page == "Cost & Usage":
         render_cost_usage(bundle)
+    elif page == "Demand":
+        render_demand(bundle)
     elif page == "Building EUI":
         render_eui(bundle)
     elif page == "Variance & Exceptions":

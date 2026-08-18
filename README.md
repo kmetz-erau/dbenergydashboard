@@ -10,11 +10,42 @@ Upload the latest enhanced FPL Excel workbook and the app will:
 - aggregate multiple meters to the correct building before EUI calculation;
 - calculate cost, kWh, effective $/kWh, kWh/sf, $/sf and electric EUI;
 - calculate previous-period cost, usage and EUI variances;
+- extract billed demand from **Selected Enriched** (falling back to **PDF Details**), including GSD-1 demand lines not fully structured by the collector;
+- calculate billed peak kW, on-peak/maximum demand, W/sf demand intensity and demand-charge analytics;
+- retain normalized demand records in the dashboard database so demand history and month-over-month demand variance grow with each upload;
 - calculate rolling 12-month building metrics;
 - flag unmapped meters, unresolved shared meters, missing floor area and other data-quality issues;
 - propose mappings for newly observed meters when the same FPL account has history tied to a single known building;
 - let an administrator add/edit buildings and meter mappings in the app;
 - export an analyzed Excel workbook and CSV outputs.
+
+
+## Demand analytics
+
+When the enhanced workbook contains **Selected Enriched** or **PDF Details**, the app extracts demand-bearing bills and adds a **Demand** dashboard page. The loader supports both structured demand fields and PDF-text fallbacks such as:
+
+```text
+Demand: ($15.03 per KW) $1,082.16
+Demand KW 1.20 60.00 72
+Demand charge: $14.23 per KW
+Maximum $0.79 per KW
+On-peak demand ...
+Maximum demand ...
+```
+
+The dashboard provides:
+
+- billed peak demand (kW);
+- previous billed peak and percent change once at least two uploads are stored;
+- on-peak and maximum demand where available;
+- demand intensity in W/sf;
+- demand charges and rate-schedule summaries;
+- rolling 12-month maximum billed demand;
+- unmapped demand-meter exceptions.
+
+For multi-meter buildings, building peak kW is the **sum of each meter's billed peak**, which is not necessarily a coincident interval peak. The UI labels this limitation. For TOU bills where FPL exposes the component $/kW rates but not a single demand-charge dollar line, the app calculates a transparent estimate and flags the row as estimated.
+
+Demand history persistence uses the same database as Reference Data. On a hosted deployment, set `DATABASE_URL` to durable Postgres if you want prior-demand comparisons to survive app restarts/redeploys.
 
 ## Electric EUI
 
@@ -74,10 +105,11 @@ The first run creates `data/dashboard.db` and seeds it from the two reference CS
 3. Upload the workbook in the sidebar.
 4. Review **Data Quality** for new/unmapped meters.
 5. Confirm new mappings in **Reference Data**.
-6. Review Overview, Cost & Usage, Building EUI, and Variance & Exceptions.
+6. Review Overview, Cost & Usage, **Demand**, Building EUI, and Variance & Exceptions.
 7. Download the analyzed workbook if desired.
 
-The monthly workbook is not stored by the app. Analytics are generated from the uploaded workbook in memory.
+The uploaded workbook file itself is not stored by the app. Bill-history analytics are generated from the workbook in memory.
+Normalized demand records are persisted in the dashboard database (keyed by account, meter and bill date) so the Demand page can build prior-month comparisons as future monthly workbooks are uploaded.
 
 ## Add a new building
 
@@ -144,7 +176,7 @@ The filesystem on a hosted application should not be treated as durable referenc
 DATABASE_URL = "postgresql://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require"
 ```
 
-The application will create and seed the `buildings` and `meters` tables automatically on first connection.
+The application will create and seed the `buildings` and `meters` tables automatically on first connection, and will also create a `demand_history` table for monthly demand persistence.
 
 Optionally protect reference edits:
 
@@ -161,7 +193,7 @@ Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` for local se
 1. Push this repository to GitHub.
 2. Create a Streamlit Community Cloud app from the repository.
 3. Set the entry point to `app.py`.
-4. Add `DATABASE_URL` and optionally `ADMIN_PASSWORD` in the app's Secrets settings.
+4. Add `APP_PASSWORD`, `DATABASE_URL`, and optionally `ADMIN_PASSWORD` in the app's Secrets settings.
 5. Deploy.
 
 ## Expected workbook schema
@@ -195,7 +227,7 @@ The application intentionally does not silently guess when reference data are am
 pytest -q
 ```
 
-The tests cover meter-ID reconstruction, previous-bill variance, EUI math, and unmapped-meter handling.
+The tests cover meter-ID reconstruction, previous-bill variance, EUI math, demand parsing, demand intensity, demand persistence, and unmapped-meter handling.
 
 ## Responsive layout
 

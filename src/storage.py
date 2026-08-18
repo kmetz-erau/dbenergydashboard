@@ -8,6 +8,7 @@ import pandas as pd
 from sqlalchemy import (
     Boolean,
     Column,
+    DateTime,
     Float,
     Integer,
     MetaData,
@@ -55,6 +56,33 @@ meters_table = Table(
     Column("status", String(100), nullable=False, default="Current"),
     Column("active", Boolean, nullable=False, default=True),
     Column("notes", String(1000), nullable=True),
+)
+
+
+demand_history_table = Table(
+    "demand_history",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("demand_key", String(300), nullable=False, unique=True),
+    Column("account_number", String(100), nullable=False),
+    Column("account_name", String(300), nullable=True),
+    Column("service_address", String(500), nullable=True),
+    Column("meter_id", String(100), nullable=False),
+    Column("date_billed", DateTime, nullable=False),
+    Column("rate_schedule_bill", String(100), nullable=True),
+    Column("bill_rate", String(2000), nullable=True),
+    Column("generic_demand_kw", Float, nullable=True),
+    Column("on_peak_demand_kw", Float, nullable=True),
+    Column("maximum_demand_kw", Float, nullable=True),
+    Column("billed_peak_demand_kw", Float, nullable=True),
+    Column("demand_charge_per_kw", Float, nullable=True),
+    Column("maximum_demand_charge_per_kw", Float, nullable=True),
+    Column("demand_charge_amount", Float, nullable=True),
+    Column("demand_charge_is_estimated", Boolean, nullable=False, default=False),
+    Column("kwh", Float, nullable=True),
+    Column("total_bill_amount", Float, nullable=True),
+    Column("source_sheet", String(100), nullable=True),
+    Column("source_file", String(500), nullable=True),
 )
 
 
@@ -185,3 +213,99 @@ def update_meter(engine: Engine, row_id: int, values: dict[str, Any]) -> None:
 def delete_meter(engine: Engine, row_id: int) -> None:
     with engine.begin() as conn:
         conn.execute(delete(meters_table).where(meters_table.c.id == row_id))
+
+
+DEMAND_APP_COLUMNS = [
+    "accountNumber", "accountName", "serviceAddress", "dateBilled", "billMonth",
+    "fullMeterID", "rateScheduleBill", "billRate", "genericDemandKW",
+    "onPeakDemandKW", "maximumDemandKW", "billedPeakDemandKW",
+    "demandChargePerKW", "maximumDemandChargePerKW", "demandChargeAmount",
+    "demandChargeIsEstimated", "kWh", "totalBillAmount", "sourceSheet", "sourceFile",
+]
+
+
+def upsert_demand_history(engine: Engine, demand: pd.DataFrame, source_file: str | None = None) -> dict[str, int]:
+    """Persist normalized demand rows so month-over-month demand history grows with uploads."""
+    if demand is None or demand.empty:
+        return {"inserted": 0, "updated": 0}
+
+    inserted = 0
+    updated_count = 0
+    with engine.begin() as conn:
+        for row in demand.to_dict("records"):
+            meter_id = str(row.get("fullMeterID") or "").strip().upper()
+            account = str(row.get("accountNumber") or "").strip()
+            date_billed = pd.to_datetime(row.get("dateBilled"), errors="coerce")
+            if not meter_id or not account or pd.isna(date_billed):
+                continue
+            date_value = date_billed.to_pydatetime()
+            demand_key = f"{account}|{meter_id}|{date_billed:%Y-%m-%d}"
+            payload = {
+                "demand_key": demand_key,
+                "account_number": account,
+                "account_name": _none_if_nan(row.get("accountName")),
+                "service_address": _none_if_nan(row.get("serviceAddress")),
+                "meter_id": meter_id,
+                "date_billed": date_value,
+                "rate_schedule_bill": _none_if_nan(row.get("rateScheduleBill")),
+                "bill_rate": _none_if_nan(row.get("billRate")),
+                "generic_demand_kw": _none_if_nan(row.get("genericDemandKW")),
+                "on_peak_demand_kw": _none_if_nan(row.get("onPeakDemandKW")),
+                "maximum_demand_kw": _none_if_nan(row.get("maximumDemandKW")),
+                "billed_peak_demand_kw": _none_if_nan(row.get("billedPeakDemandKW")),
+                "demand_charge_per_kw": _none_if_nan(row.get("demandChargePerKW")),
+                "maximum_demand_charge_per_kw": _none_if_nan(row.get("maximumDemandChargePerKW")),
+                "demand_charge_amount": _none_if_nan(row.get("demandChargeAmount")),
+                "demand_charge_is_estimated": bool(row.get("demandChargeIsEstimated", False)),
+                "kwh": _none_if_nan(row.get("kWh")),
+                "total_bill_amount": _none_if_nan(row.get("totalBillAmount")),
+                "source_sheet": _none_if_nan(row.get("sourceSheet")),
+                "source_file": source_file,
+            }
+            existing = conn.execute(
+                select(demand_history_table.c.id).where(demand_history_table.c.demand_key == demand_key)
+            ).first()
+            if existing is None:
+                conn.execute(insert(demand_history_table).values(**payload))
+                inserted += 1
+            else:
+                conn.execute(
+                    update(demand_history_table)
+                    .where(demand_history_table.c.demand_key == demand_key)
+                    .values(**payload)
+                )
+                updated_count += 1
+    return {"inserted": inserted, "updated": updated_count}
+
+
+def load_demand_history(engine: Engine) -> pd.DataFrame:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(demand_history_table).order_by(demand_history_table.c.date_billed, demand_history_table.c.account_number)
+        ).mappings().all()
+    if not rows:
+        return pd.DataFrame(columns=DEMAND_APP_COLUMNS)
+    df = pd.DataFrame(rows).rename(columns={
+        "account_number": "accountNumber",
+        "account_name": "accountName",
+        "service_address": "serviceAddress",
+        "meter_id": "fullMeterID",
+        "date_billed": "dateBilled",
+        "rate_schedule_bill": "rateScheduleBill",
+        "bill_rate": "billRate",
+        "generic_demand_kw": "genericDemandKW",
+        "on_peak_demand_kw": "onPeakDemandKW",
+        "maximum_demand_kw": "maximumDemandKW",
+        "billed_peak_demand_kw": "billedPeakDemandKW",
+        "demand_charge_per_kw": "demandChargePerKW",
+        "maximum_demand_charge_per_kw": "maximumDemandChargePerKW",
+        "demand_charge_amount": "demandChargeAmount",
+        "demand_charge_is_estimated": "demandChargeIsEstimated",
+        "kwh": "kWh",
+        "total_bill_amount": "totalBillAmount",
+        "source_sheet": "sourceSheet",
+        "source_file": "sourceFile",
+    })
+    df["dateBilled"] = pd.to_datetime(df["dateBilled"], errors="coerce")
+    df["billMonth"] = df["dateBilled"].dt.to_period("M").dt.to_timestamp()
+    return df[[c for c in DEMAND_APP_COLUMNS if c in df.columns]]

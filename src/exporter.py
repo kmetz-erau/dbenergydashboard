@@ -46,6 +46,10 @@ def _format_workbook(buffer: BytesIO) -> BytesIO:
                     cell.number_format = '$#,##0.00;[Red]($#,##0.00);-'
                 elif "eui" in lname:
                     cell.number_format = "0.0"
+                elif "demand" in lname and "charge" not in lname:
+                    cell.number_format = "#,##0.0"
+                elif "intensity" in lname:
+                    cell.number_format = "0.00"
                 elif "kwh" in lname:
                     cell.number_format = "#,##0.0"
                 elif "sqft" in lname or lname.endswith("sf"):
@@ -69,6 +73,11 @@ def build_analysis_workbook(
         bundle.building_monthly.to_excel(writer, sheet_name="Building Monthly", index=False)
         bundle.building_snapshot.to_excel(writer, sheet_name="Building Snapshot", index=False)
         bundle.campus_monthly.to_excel(writer, sheet_name="Campus Monthly", index=False)
+        bundle.demand_details.to_excel(writer, sheet_name="Demand History", index=False)
+        bundle.allocated_demand.to_excel(writer, sheet_name="Allocated Demand", index=False)
+        bundle.building_demand_monthly.to_excel(writer, sheet_name="Building Demand", index=False)
+        bundle.building_demand_snapshot.to_excel(writer, sheet_name="Demand Snapshot", index=False)
+        bundle.unmapped_demand_meters.to_excel(writer, sheet_name="Unmapped Demand", index=False)
         bundle.unmapped_meters.to_excel(writer, sheet_name="Unmapped Meters", index=False)
         bundle.meter_suggestions.to_excel(writer, sheet_name="Meter Suggestions", index=False)
         bundle.shared_meter_issues.to_excel(writer, sheet_name="Shared Meter Issues", index=False)

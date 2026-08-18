@@ -23,6 +23,11 @@ class AnalyticsBundle:
     meter_suggestions: pd.DataFrame
     missing_area: pd.DataFrame
     duplicate_bills: pd.DataFrame
+    demand_details: pd.DataFrame
+    allocated_demand: pd.DataFrame
+    building_demand_monthly: pd.DataFrame
+    building_demand_snapshot: pd.DataFrame
+    unmapped_demand_meters: pd.DataFrame
 
 
 def prepare_references(buildings: pd.DataFrame, meters: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -295,7 +300,156 @@ def build_campus_monthly(building_monthly: pd.DataFrame) -> pd.DataFrame:
     return campus
 
 
-def run_analytics(bills: pd.DataFrame, buildings: pd.DataFrame, meters: pd.DataFrame) -> AnalyticsBundle:
+
+def allocate_demand_to_buildings(
+    demand: pd.DataFrame,
+    buildings: pd.DataFrame,
+    meters: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Map billed demand records to buildings using the same meter crosswalk as energy."""
+    if demand is None or demand.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    b, m = prepare_references(buildings, meters)
+    resolved, shared_issues = _resolved_electric_meter_map(m)
+    if resolved.empty:
+        return pd.DataFrame(), demand.copy()
+
+    d = demand.copy()
+    d["fullMeterID"] = d["fullMeterID"].map(normalize_meter_id)
+    d["dateBilled"] = pd.to_datetime(d["dateBilled"], errors="coerce")
+    d["billMonth"] = d["dateBilled"].dt.to_period("M").dt.to_timestamp()
+
+    ref_cols = ["meter_id", "building_id", "rate_schedule", "allocation_pct", "status"]
+    allocated = d.merge(
+        resolved[ref_cols],
+        how="inner",
+        left_on="fullMeterID",
+        right_on="meter_id",
+    )
+    allocated = allocated.rename(columns={"rate_schedule": "referenceRateSchedule"})
+    allocated = allocated.merge(
+        b[["building_id", "property_id", "campus", "facility_name", "use_type", "area_sqft", "eui_category"]],
+        how="left",
+        on="building_id",
+    )
+
+    demand_fields = [
+        "genericDemandKW",
+        "onPeakDemandKW",
+        "maximumDemandKW",
+        "billedPeakDemandKW",
+        "demandChargeAmount",
+    ]
+    for field in demand_fields:
+        if field not in allocated.columns:
+            allocated[field] = np.nan
+        allocated[field] = pd.to_numeric(allocated[field], errors="coerce")
+        allocated[f"allocated{field[0].upper()}{field[1:]}"] = allocated[field] * allocated["allocation_pct"]
+
+    known_ids = set(resolved["meter_id"].dropna()) | set(shared_issues["meter_id"].dropna())
+    used = d[d["fullMeterID"].ne("")].copy()
+    unmapped = used[~used["fullMeterID"].isin(known_ids)].copy()
+    if not unmapped.empty:
+        unmapped = (
+            unmapped.groupby(["fullMeterID", "accountNumber", "accountName", "serviceAddress"], dropna=False)
+            .agg(
+                firstSeen=("dateBilled", "min"),
+                lastSeen=("dateBilled", "max"),
+                demandRecordCount=("dateBilled", "count"),
+                latestPeakKW=("billedPeakDemandKW", "last"),
+            )
+            .reset_index()
+            .sort_values(["lastSeen", "fullMeterID"], ascending=[False, True])
+        )
+    return allocated, unmapped
+
+
+def build_building_demand_monthly(allocated_demand: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate meter-level billed peaks to building/month.
+
+    For multi-meter buildings, summed kW is the sum of individual billed meter peaks.
+    It is not a coincident campus/building interval peak unless those meters peak at
+    the same time. The dashboard labels this explicitly.
+    """
+    if allocated_demand is None or allocated_demand.empty:
+        return pd.DataFrame()
+
+    group_cols = [
+        "building_id",
+        "property_id",
+        "campus",
+        "facility_name",
+        "use_type",
+        "area_sqft",
+        "eui_category",
+        "billMonth",
+    ]
+    monthly = (
+        allocated_demand.groupby(group_cols, dropna=False)
+        .agg(
+            billedPeakDemandKW=("allocatedBilledPeakDemandKW", lambda x: x.sum(min_count=1)),
+            genericDemandKW=("allocatedGenericDemandKW", lambda x: x.sum(min_count=1)),
+            onPeakDemandKW=("allocatedOnPeakDemandKW", lambda x: x.sum(min_count=1)),
+            maximumDemandKW=("allocatedMaximumDemandKW", lambda x: x.sum(min_count=1)),
+            demandChargeAmount=("allocatedDemandChargeAmount", lambda x: x.sum(min_count=1)),
+            meterCount=("fullMeterID", "nunique"),
+            accountCount=("accountNumber", "nunique"),
+            estimatedChargeRows=("demandChargeIsEstimated", "sum"),
+        )
+        .reset_index()
+    )
+    monthly["demandIntensityWPerSF"] = (
+        monthly["billedPeakDemandKW"] * 1000
+        / monthly["area_sqft"].where(monthly["area_sqft"] > 0)
+    )
+    monthly["demandChargePerSF"] = (
+        monthly["demandChargeAmount"]
+        / monthly["area_sqft"].where(monthly["area_sqft"] > 0)
+    )
+
+    monthly = monthly.sort_values(["building_id", "billMonth"]).reset_index(drop=True)
+    g = monthly.groupby("building_id", group_keys=False)
+    monthly["previousPeakDemandKW"] = g["billedPeakDemandKW"].shift(1)
+    monthly["previousDemandIntensityWPerSF"] = g["demandIntensityWPerSF"].shift(1)
+    monthly["demandChangePct"] = (
+        monthly["billedPeakDemandKW"] - monthly["previousPeakDemandKW"]
+    ) / monthly["previousPeakDemandKW"].replace(0, np.nan)
+    monthly["demandIntensityChangePct"] = (
+        monthly["demandIntensityWPerSF"] - monthly["previousDemandIntensityWPerSF"]
+    ) / monthly["previousDemandIntensityWPerSF"].replace(0, np.nan)
+    monthly["rolling12PeakDemandKW"] = (
+        g["billedPeakDemandKW"].rolling(12, min_periods=1).max().reset_index(level=0, drop=True)
+    )
+    monthly["rolling12DemandChargeAmount"] = (
+        g["demandChargeAmount"].rolling(12, min_periods=1).sum().reset_index(level=0, drop=True)
+    )
+    return monthly
+
+
+def build_demand_snapshot(building_demand_monthly: pd.DataFrame) -> pd.DataFrame:
+    if building_demand_monthly is None or building_demand_monthly.empty:
+        return pd.DataFrame()
+    snapshot = (
+        building_demand_monthly.sort_values(["building_id", "billMonth"])
+        .groupby("building_id", as_index=False)
+        .tail(1)
+        .copy()
+    )
+    snapshot["demandIntensityRank"] = np.nan
+    eligible = snapshot["demandIntensityWPerSF"].notna()
+    snapshot.loc[eligible, "demandIntensityRank"] = snapshot.loc[eligible, "demandIntensityWPerSF"].rank(
+        method="min", ascending=False
+    )
+    return snapshot.sort_values("billedPeakDemandKW", ascending=False, na_position="last").reset_index(drop=True)
+
+
+def run_analytics(
+    bills: pd.DataFrame,
+    buildings: pd.DataFrame,
+    meters: pd.DataFrame,
+    demand: pd.DataFrame | None = None,
+) -> AnalyticsBundle:
     b, m = prepare_references(buildings, meters)
     allocated, unmapped, shared = allocate_bills_to_buildings(bills, b, m)
     monthly = build_building_monthly(allocated)
@@ -305,6 +459,12 @@ def run_analytics(bills: pd.DataFrame, buildings: pd.DataFrame, meters: pd.DataF
     missing_area = b[b["area_sqft"].isna() | b["area_sqft"].le(0)].copy()
     dup_subset = [c for c in ["accountNumber", "dateBilled", "fullMeterID"] if c in bills.columns]
     duplicates = bills[bills.duplicated(subset=dup_subset, keep=False)].copy() if dup_subset else pd.DataFrame()
+
+    demand_details = demand.copy() if demand is not None else pd.DataFrame()
+    allocated_demand, unmapped_demand = allocate_demand_to_buildings(demand_details, b, m)
+    demand_monthly = build_building_demand_monthly(allocated_demand)
+    demand_snapshot = build_demand_snapshot(demand_monthly)
+
     return AnalyticsBundle(
         bills=bills,
         allocated_bills=allocated,
@@ -316,8 +476,12 @@ def run_analytics(bills: pd.DataFrame, buildings: pd.DataFrame, meters: pd.DataF
         meter_suggestions=suggestions,
         missing_area=missing_area,
         duplicate_bills=duplicates,
+        demand_details=demand_details,
+        allocated_demand=allocated_demand,
+        building_demand_monthly=demand_monthly,
+        building_demand_snapshot=demand_snapshot,
+        unmapped_demand_meters=unmapped_demand,
     )
-
 
 def build_exception_table(bundle: AnalyticsBundle, cost_threshold: float, usage_threshold: float, eui_threshold: float) -> pd.DataFrame:
     df = bundle.building_monthly.copy()
