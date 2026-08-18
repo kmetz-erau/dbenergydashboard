@@ -142,9 +142,9 @@ def secret_or_env(name: str, default: str | None = None) -> str | None:
 
 @st.cache_resource
 def database_engine(database_url: str | None):
-    engine = get_engine(database_url)
-    init_database(engine, seed=True)
-    return engine
+    # Cache only the connection pool/Engine. Schema checks are intentionally
+    # performed on every Streamlit script run so Git hot-reloads can add tables.
+    return get_engine(database_url)
 
 
 def currency(value: float | None) -> str:
@@ -799,6 +799,11 @@ def main():
     inject_responsive_css()
     database_url = secret_or_env("DATABASE_URL")
     engine = database_engine(database_url)
+
+    # Idempotent schema upgrade on every run. This preserves all existing rows
+    # while creating newly-added tables such as demand_history when required.
+    init_database(engine, seed=True)
+
     buildings = load_buildings(engine, include_inactive=True)
     meters = load_meters(engine, include_inactive=True)
 

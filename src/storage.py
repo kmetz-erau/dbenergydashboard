@@ -97,10 +97,27 @@ def get_engine(database_url: str | None = None) -> Engine:
 
 
 def init_database(engine: Engine, seed: bool = True) -> None:
+    """Create any missing schema objects without deleting existing data.
+
+    This intentionally runs safely against an existing database. SQLAlchemy's
+    ``create_all`` only creates missing tables, which makes it suitable for the
+    additive schema changes used by this app (for example, demand_history).
+    """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    metadata.create_all(engine)
+    metadata.create_all(engine, checkfirst=True)
     if seed:
         _seed_if_empty(engine)
+
+
+def ensure_demand_history_table(engine: Engine) -> None:
+    """Ensure the demand-history table exists before any demand operation.
+
+    Streamlit can keep a cached Engine alive across a Git hot-reload. If a new
+    table is added in a deployment, the cached Engine may survive while the
+    one-time initialization function does not run again. Creating this table
+    with ``checkfirst=True`` is idempotent and protects upgrades from older DBs.
+    """
+    demand_history_table.create(engine, checkfirst=True)
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -226,6 +243,7 @@ DEMAND_APP_COLUMNS = [
 
 def upsert_demand_history(engine: Engine, demand: pd.DataFrame, source_file: str | None = None) -> dict[str, int]:
     """Persist normalized demand rows so month-over-month demand history grows with uploads."""
+    ensure_demand_history_table(engine)
     if demand is None or demand.empty:
         return {"inserted": 0, "updated": 0}
 
@@ -279,6 +297,7 @@ def upsert_demand_history(engine: Engine, demand: pd.DataFrame, source_file: str
 
 
 def load_demand_history(engine: Engine) -> pd.DataFrame:
+    ensure_demand_history_table(engine)
     with engine.connect() as conn:
         rows = conn.execute(
             select(demand_history_table).order_by(demand_history_table.c.date_billed, demand_history_table.c.account_number)

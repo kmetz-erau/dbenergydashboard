@@ -159,3 +159,49 @@ def test_demand_history_upsert_is_idempotent(tmp_path):
     assert first == {"inserted": 1, "updated": 0}
     assert second == {"inserted": 0, "updated": 1}
     assert len(history) == 1
+
+
+def test_demand_history_auto_migrates_legacy_database(tmp_path):
+    """An existing pre-demand DB is upgraded without deleting reference data."""
+    from sqlalchemy import insert, select
+    from src.storage import (
+        buildings_table,
+        demand_history_table,
+        get_engine,
+        metadata,
+        upsert_demand_history,
+    )
+
+    db_path = tmp_path / "legacy.db"
+    engine = get_engine(f"sqlite:///{db_path}")
+
+    # Simulate an older deployment that had buildings but no demand_history.
+    buildings_table.create(engine, checkfirst=True)
+    with engine.begin() as conn:
+        conn.execute(insert(buildings_table).values(
+            building_id="Building TEST",
+            campus="DB",
+            area_sqft=10000,
+            eui_category="Normal Building",
+            active=True,
+        ))
+
+    demand = pd.DataFrame([{
+        "accountNumber": "123456",
+        "accountName": "Test",
+        "serviceAddress": "TEST",
+        "dateBilled": pd.Timestamp("2026-08-01"),
+        "fullMeterID": "MV12345",
+        "billedPeakDemandKW": 100.0,
+        "demandChargeIsEstimated": False,
+        "kWh": 1000.0,
+        "totalBillAmount": 500.0,
+    }])
+
+    result = upsert_demand_history(engine, demand, "legacy-upgrade.xlsx")
+    assert result["inserted"] == 1
+
+    # New table exists and the old building row remains intact.
+    with engine.connect() as conn:
+        assert conn.execute(select(demand_history_table.c.id)).first() is not None
+        assert conn.execute(select(buildings_table.c.building_id)).scalar_one() == "Building TEST"

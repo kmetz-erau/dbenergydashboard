@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import io
 import re
-from dataclasses import dataclass
-from typing import BinaryIO
+from typing import BinaryIO, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -75,8 +74,7 @@ DEMAND_OUTPUT_COLUMNS = [
 ]
 
 
-@dataclass
-class WorkbookLoadResult:
+class WorkbookLoadResult(NamedTuple):
     bills: pd.DataFrame
     demand: pd.DataFrame
     sheet_names: list[str]

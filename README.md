@@ -257,3 +257,9 @@ Do **not** commit `.streamlit/secrets.toml`; it is already ignored by `.gitignor
 For Streamlit Community Cloud, open the deployed app settings and place `APP_PASSWORD` in the **Secrets** section. The app renders no workbook data, reference data, or dashboard navigation until the correct password is entered.
 
 `ADMIN_PASSWORD` remains optional and can be used as a second password specifically for adding/editing buildings and meters.
+
+## Upgrading an existing deployment
+
+The app performs an idempotent database schema check on every Streamlit script run. This means an existing SQLite/Postgres database created by an older version will automatically receive newly-added tables such as `demand_history` without deleting existing building or meter reference rows.
+
+If Streamlit Community Cloud is already running an older commit, push the updated repo and reboot/redeploy the app once after the code update. The repository requests Python 3.12 via `.python-version`; if your deployment environment is configured separately, Python 3.12 is the recommended runtime for this project.
