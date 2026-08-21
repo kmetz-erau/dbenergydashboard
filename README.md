@@ -1,63 +1,66 @@
 # ERAU Energy Dashboard
 
-A Streamlit application for monthly FPL bill-history analytics at ERAU Daytona Beach.
+A password-protected Streamlit dashboard for ERAU Daytona Beach utility analytics.
 
-Upload the latest enhanced FPL Excel workbook and the app will:
+The application keeps the existing FPL electricity workflow intact and adds a **separate, additive natural-gas module** for TECO and Gas South. Electricity and gas are combined only at the building analytics layer for Total Site EUI.
 
-- validate and normalize the **Bill History** sheet;
+## What the app does
+
+### Existing FPL electricity module — unchanged
+
+Upload the enhanced FPL workbook and the app continues to:
+
+- validate and normalize **Bill History**;
 - reconstruct FPL meter IDs from `billRaw.meterSymbol + meterNumber`;
-- map meters to buildings, rate schedules, utilities and square footage;
-- aggregate multiple meters to the correct building before EUI calculation;
+- map electric meters to buildings, square footage, rate schedules and allocations;
 - calculate cost, kWh, effective $/kWh, kWh/sf, $/sf and electric EUI;
-- calculate previous-period cost, usage and EUI variances;
-- extract billed demand from **Selected Enriched** (falling back to **PDF Details**), including GSD-1 demand lines not fully structured by the collector;
-- calculate billed peak kW, on-peak/maximum demand, W/sf demand intensity and demand-charge analytics;
-- retain normalized demand records in the dashboard database so demand history and month-over-month demand variance grow with each upload;
-- calculate rolling 12-month building metrics;
-- flag unmapped meters, unresolved shared meters, missing floor area and other data-quality issues;
-- propose mappings for newly observed meters when the same FPL account has history tied to a single known building;
-- let an administrator add/edit buildings and meter mappings in the app;
-- export an analyzed Excel workbook and CSV outputs.
+- calculate cost, usage and EUI variance;
+- parse demand from **Selected Enriched** / **PDF Details**;
+- calculate billed peak kW, on-peak/maximum demand, W/sf and demand charges;
+- retain demand history in the database for month-over-month demand variance;
+- flag unmapped/replacement/shared meters and missing floor area;
+- let administrators add/edit buildings and meter mappings.
 
+### New natural-gas module
 
-## Demand analytics
+Gas is stored separately from FPL data. Upload a normalized gas Excel/CSV file and the app will:
 
-When the enhanced workbook contains **Selected Enriched** or **PDF Details**, the app extracts demand-bearing bills and adds a **Demand** dashboard page. The loader supports both structured demand fields and PDF-text fallbacks such as:
+- store TECO and Gas South invoice history by month;
+- map provider accounts to buildings and physical gas usage groups;
+- calculate therms, gas cost, cost/therm and month-over-month variance;
+- calculate rolling-12-month therms and gas cost;
+- calculate **Gas EUI** in kBtu/sf/year;
+- calculate gas $/sf;
+- report zero-usage bills with fixed charges;
+- compare provider/billing-component costs;
+- flag unmapped and unregistered gas accounts;
+- let administrators add/edit gas provider accounts;
+- retain gas history in the same database across monthly uploads.
 
-```text
-Demand: ($15.03 per KW) $1,082.16
-Demand KW 1.20 60.00 72
-Demand charge: $14.23 per KW
-Maximum $0.79 per KW
-On-peak demand ...
-Maximum demand ...
-```
+### Total Site EUI
 
-The dashboard provides:
-
-- billed peak demand (kW);
-- previous billed peak and percent change once at least two uploads are stored;
-- on-peak and maximum demand where available;
-- demand intensity in W/sf;
-- demand charges and rate-schedule summaries;
-- rolling 12-month maximum billed demand;
-- unmapped demand-meter exceptions.
-
-For multi-meter buildings, building peak kW is the **sum of each meter's billed peak**, which is not necessarily a coincident interval peak. The UI labels this limitation. For TOU bills where FPL exposes the component $/kW rates but not a single demand-charge dollar line, the app calculates a transparent estimate and flags the row as estimated.
-
-Demand history persistence uses the same database as Reference Data. On a hosted deployment, set `DATABASE_URL` to durable Postgres if you want prior-demand comparisons to survive app restarts/redeploys.
-
-## Electric EUI
-
-The application currently calculates **electricity-only site EUI**:
+The combined page calculates:
 
 ```text
-Electric EUI (kBtu/sf) = electricity kWh × 3.412 / gross floor area (sf)
+Electric EUI = kWh × 3.412 / sf
+Gas EUI      = therms × 100 / sf
+Total Site EUI = Electric EUI + Gas EUI
 ```
 
-`rolling12ElectricEUI` uses rolling 12-month electricity use and is therefore expressed as kBtu/sf/year once 12 months of data are available.
+Gas accounts marked `include_in_site_eui = False` are excluded from Gas EUI. The seeded **Building 610 Student Union generator** account is excluded by default.
 
-Central plants, pump houses, exterior loads and other special facilities are retained, but they are separated from normal-building peer rankings. Buildings with no floor area are not assigned EUI.
+## Important: TECO + Gas South therm de-duplication
+
+Some buildings have both a TECO invoice and a Gas South invoice for the **same physical gas consumption**. Those therms must not be added together.
+
+The dashboard uses a `usage_group` to connect the two provider accounts for the same service. Within each building/month/usage-group:
+
+- all provider **costs are summed**;
+- therms come from the row marked `usage_authoritative = True`;
+- if no row is marked authoritative, the maximum reported therm value is used;
+- the resulting physical therm usage is counted once for Gas EUI.
+
+The seeded TECO/Gas South account mappings supplied for the campus already use this structure.
 
 ## Repository layout
 
@@ -66,26 +69,35 @@ erau-energy-dashboard/
 ├── app.py
 ├── requirements.txt
 ├── README.md
+├── pytest.ini
+├── .python-version
+├── .streamlit/
+│   ├── config.toml
+│   └── secrets.toml.example
 ├── data/
 │   ├── buildings_seed.csv
-│   └── meters_seed.csv
+│   ├── meters_seed.csv
+│   ├── gas_accounts_seed.csv
+│   └── gas_upload_template.csv
 ├── src/
-│   ├── analytics.py
+│   ├── analytics.py          # existing FPL/electric analytics
+│   ├── loader.py             # existing FPL workbook loader
+│   ├── gas_analytics.py      # additive gas + Site EUI analytics
+│   ├── gas_loader.py         # gas Excel/CSV loader + template generator
 │   ├── exporter.py
-│   ├── loader.py
+│   ├── auth.py
 │   ├── reference_io.py
 │   └── storage.py
-├── tests/
-│   ├── test_analytics.py
-│   └── test_loader.py
-└── .streamlit/
-    ├── config.toml
-    └── secrets.toml.example
+└── tests/
+    ├── test_analytics.py
+    ├── test_demand.py
+    ├── test_loader.py
+    └── test_gas.py
 ```
 
 ## Run locally
 
-Requires Python 3.11+.
+Python 3.12 is recommended.
 
 ```bash
 python -m venv .venv
@@ -96,130 +108,187 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-The first run creates `data/dashboard.db` and seeds it from the two reference CSV files.
+## Password setup
 
-## Monthly workflow
+The entire app requires `APP_PASSWORD`.
 
-1. Run the FPL collector and create the enhanced `.xlsx` workbook.
-2. Open the dashboard.
-3. Upload the workbook in the sidebar.
-4. Review **Data Quality** for new/unmapped meters.
-5. Confirm new mappings in **Reference Data**.
-6. Review Overview, Cost & Usage, **Demand**, Building EUI, and Variance & Exceptions.
-7. Download the analyzed workbook if desired.
-
-The uploaded workbook file itself is not stored by the app. Bill-history analytics are generated from the workbook in memory.
-Normalized demand records are persisted in the dashboard database (keyed by account, meter and bill date) so the Demand page can build prior-month comparisons as future monthly workbooks are uploaded.
-
-## Add a new building
-
-Open **Reference Data → Buildings** and enter:
-
-- Building ID
-- Property ID
-- Facility name
-- Use type
-- Campus
-- Gross floor area (sf)
-- EUI category
-- Notes
-
-After the building exists, add its meters under **Reference Data → Meters**.
-
-## Add a new meter
-
-Open **Reference Data → Meters** and enter:
-
-- Meter ID
-- Building ID
-- Utility
-- Rate schedule
-- Campus
-- Status (`Current`, `Historical`, `Shared`, etc.)
-- Allocation fraction
-- Notes
-
-If an upload contains a new meter, **Data Quality** will show it. When an FPL account has known meter history for only one building, the app creates a high-confidence building suggestion. Suggestions never affect EUI until an administrator saves the mapping.
-
-### Shared meters
-
-If one physical meter serves multiple buildings, create one row for each building and enter allocation fractions that total exactly `1.0`.
-
-Example:
+For local use, copy:
 
 ```text
-ACD4331 → Building 1600   allocation 0.40
-ACD4331 → Building 1624   allocation 0.60
+.streamlit/secrets.toml.example
 ```
 
-Until all allocations are present and total 100%, that meter is excluded from building EUI to prevent double counting.
+to:
 
-## Historical/replacement meters
+```text
+.streamlit/secrets.toml
+```
 
-Do not delete an old meter merely because FPL replaced it. Change its status to `Historical` and add the replacement meter. Historical meters remain valid for prior bill history and rolling EUI.
+and set:
 
-## Persistent reference edits in production
+```toml
+APP_PASSWORD = "your-strong-password"
+```
 
-### Local use
+Never commit the real `secrets.toml` file.
 
-No setup is required. The app uses SQLite at:
+For Streamlit Community Cloud, set secrets in **App settings → Secrets**.
+
+## Persistent database
+
+Locally the app uses:
 
 ```text
 data/dashboard.db
 ```
 
-### Hosted Streamlit deployment
-
-The filesystem on a hosted application should not be treated as durable reference storage. For production, create a small hosted Postgres database (Supabase, Neon, Railway, Render, etc.) and set a Streamlit secret:
+For a hosted Streamlit deployment, use hosted Postgres so reference edits, demand history and gas history survive redeploys:
 
 ```toml
 DATABASE_URL = "postgresql://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require"
 ```
 
-The application will create and seed the `buildings` and `meters` tables automatically on first connection, and will also create a `demand_history` table for monthly demand persistence.
+The startup migration is additive: existing buildings, meters, FPL behavior and demand history are not deleted. Missing `gas_accounts` and `gas_history` tables are created automatically.
 
-Optionally protect reference edits:
+## Monthly workflow
 
-```toml
-ADMIN_PASSWORD = "your-admin-password"
+1. Run the FPL collector and create the enhanced FPL workbook.
+2. Open the dashboard and upload the FPL workbook exactly as before.
+3. Select the Gas bill month and prepare the monthly gas file using only **Utility Account, Cost, and Therms**.
+4. Upload the three-column gas workbook/CSV separately.
+5. Review **Natural Gas** for therms/cost/provider analytics.
+6. Review **Total Site EUI** for combined building energy intensity.
+7. Review **Data Quality** for new FPL meters and new/unmapped gas accounts.
+8. Add new buildings, meters or gas accounts under **Reference Data**.
+
+The FPL workbook itself is processed in memory as before. Demand history and gas history are persisted in the database.
+
+## Gas upload format
+
+The monthly gas upload is intentionally minimal. The app accepts `.xlsx` or `.csv`.
+
+For Excel, use a sheet named one of:
+
+- `Gas History` (preferred)
+- `Gas`
+- `Natural Gas`
+- `Gas Upload`
+
+If none of those exist, the first sheet is used.
+
+### Required columns — only these three
+
+```text
+Utility Account
+Cost
+Therms
 ```
 
-If `ADMIN_PASSWORD` is not configured, reference editing is available without a password.
+Select the **Gas bill month** in the Streamlit sidebar before uploading. The selected month is stored with the uploaded rows, so the spreadsheet does not need a date/month column.
 
-Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` for local secret testing. Never commit the real secrets file.
+`Utility Account` is the lookup key. The dashboard automatically pulls the following from **Reference Data → Gas Accounts**:
 
-## Deploy to Streamlit Community Cloud
+- provider (TECO, Gas South, etc.);
+- building;
+- ERAU account code;
+- gas meter;
+- rate schedule;
+- physical usage group;
+- cost component;
+- end use (building, generator, etc.);
+- whether the account is authoritative for therms;
+- whether the gas is included in Site EUI.
 
-1. Push this repository to GitHub.
-2. Create a Streamlit Community Cloud app from the repository.
-3. Set the entry point to `app.py`.
-4. Add `APP_PASSWORD`, `DATABASE_URL`, and optionally `ADMIN_PASSWORD` in the app's Secrets settings.
-5. Deploy.
+If an uploaded Utility Account is not registered, the gas import stops and lists the missing account number(s). Add them under **Reference Data → Gas Accounts**, then upload the same monthly file again. This prevents the app from guessing a building or provider.
 
-## Expected workbook schema
+The template is available from the dashboard Downloads page and in `data/gas_upload_template.xlsx`.
 
-The uploaded workbook must contain a sheet named **Bill History** with at least:
+## Gas reference accounts
 
-- `accountNumber`
-- `dateBilled`
-- `meterNumber`
-- `kWh`
-- `totalBillAmount`
+`data/gas_accounts_seed.csv` contains the TECO and Gas South provider accounts supplied for the Daytona Beach campus. Each row can define:
 
-For meter reconstruction, the enhanced workbook should also include `billRaw.meterSymbol`. If it is absent, the application can only match meter IDs that are represented directly by `meterNumber`.
+- provider;
+- utility account;
+- ERAU account code;
+- building;
+- gas meter;
+- rate schedule;
+- usage group;
+- cost component;
+- end use;
+- whether the provider is authoritative for therms;
+- whether the gas should be included in Site EUI.
 
-The ERAU enhanced collector workbook already contains the required fields plus billing-period, payment and raw bill-history fields.
+You can change these in **Reference Data → Gas Accounts** without editing Python.
+
+### Add a new gas account
+
+1. Add the building first if it does not exist.
+2. Add the physical gas meter under **Reference Data → Meters** if desired.
+3. Add the provider account under **Reference Data → Gas Accounts**.
+4. If a TECO and Gas South bill represent the same physical usage, give both rows the same `usage_group` and mark only one provider as authoritative for therms.
+
+## Existing building/meter editing
+
+The existing functionality remains available:
+
+- add/edit buildings and floor area;
+- add/edit current/historical/shared electric meters;
+- add/edit gas meters;
+- assign shared-meter allocation fractions;
+- resolve newly detected FPL replacement meters.
+
+## Demand analytics
+
+The existing demand module remains intact. It reads demand-bearing FPL PDF details, persists demand history, calculates billed peak kW and W/sf, and distinguishes exact versus estimated demand-charge dollars.
+
+For multi-meter buildings, the displayed building peak is the **sum of each meter's billed peak**, not necessarily a coincident interval peak.
 
 ## Data-quality safeguards
 
-The application intentionally does not silently guess when reference data are ambiguous.
+### Electricity
 
-- **Unmapped meter:** excluded from building analytics and shown for review.
-- **Shared meter without a complete 100% allocation:** excluded from building analytics.
-- **Missing square footage:** cost/use remain visible; EUI is blank.
-- **Historical meter:** remains mapped and usable.
-- **Unmetered lighting:** retained in reference data but does not match FPL Bill History unless a bill record has a corresponding meter ID.
-- **New meter suggestion:** advisory only until an administrator saves it.
+- unmapped electric meter → excluded and flagged;
+- unresolved shared meter → excluded until allocations total 100%;
+- missing floor area → EUI blank;
+- historical/replacement meters remain usable;
+- meter suggestions are advisory until saved.
+
+### Natural gas
+
+- unmapped provider account → flagged;
+- unregistered provider row → flagged even if upload building ID temporarily maps it;
+- TECO/Gas South shared usage group → therms de-duplicated, costs summed;
+- generator/excluded account → therms visible but omitted from default Gas/Site EUI;
+- missing floor area → gas cost/use visible, Gas EUI blank;
+- zero therms with positive cost → shown as a fixed-charge exception.
+
+## Downloads
+
+With an FPL workbook loaded, the analyzed Excel download contains all existing FPL sheets plus additive gas sheets when gas history exists:
+
+- Gas History
+- Gas Enriched
+- Gas Usage Groups
+- Gas Building Monthly
+- Gas Snapshot
+- Gas Campus Monthly
+- Gas Providers
+- Gas Unmapped
+- Gas Fixed Charges
+- Gas Accounts Ref
+- Total Site EUI
+
+Standalone CSV downloads are also available for gas history and the gas building snapshot.
+
+## Deploy to Streamlit Community Cloud
+
+1. Push the repository to GitHub.
+2. Create the Streamlit app using `app.py` as the entry point.
+3. Set `APP_PASSWORD` in Secrets.
+4. Set `DATABASE_URL` to hosted Postgres for persistence.
+5. Optionally set `ADMIN_PASSWORD` to protect reference editing with a second password.
+6. Deploy/reboot the app after the first schema-changing update.
 
 ## Tests
 
@@ -227,39 +296,4 @@ The application intentionally does not silently guess when reference data are am
 pytest -q
 ```
 
-The tests cover meter-ID reconstruction, previous-bill variance, EUI math, demand parsing, demand intensity, demand persistence, and unmapped-meter handling.
-
-## Responsive layout
-
-The app uses a responsive dashboard layout for laptop, tablet, and narrow browser widths:
-
-- KPI cards are limited to three per row instead of six-wide rows.
-- Charts and dataframes use Streamlit stretch width.
-- Main content padding scales with the viewport.
-- The sidebar is capped on laptop screens so it does not consume excessive horizontal space.
-- KPI typography scales down at narrower breakpoints.
-
-If you customize the dashboard, prefer short `st.columns(...)` groups and avoid forcing five or six metrics into one row.
-
-
-## App password
-
-The entire dashboard is protected by a shared password. `APP_PASSWORD` is required.
-
-For local use, copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and set:
-
-```toml
-APP_PASSWORD = "your-strong-password"
-```
-
-Do **not** commit `.streamlit/secrets.toml`; it is already ignored by `.gitignore`.
-
-For Streamlit Community Cloud, open the deployed app settings and place `APP_PASSWORD` in the **Secrets** section. The app renders no workbook data, reference data, or dashboard navigation until the correct password is entered.
-
-`ADMIN_PASSWORD` remains optional and can be used as a second password specifically for adding/editing buildings and meters.
-
-## Upgrading an existing deployment
-
-The app performs an idempotent database schema check on every Streamlit script run. This means an existing SQLite/Postgres database created by an older version will automatically receive newly-added tables such as `demand_history` without deleting existing building or meter reference rows.
-
-If Streamlit Community Cloud is already running an older commit, push the updated repo and reboot/redeploy the app once after the code update. The repository requests Python 3.12 via `.python-version`; if your deployment environment is configured separately, Python 3.12 is the recommended runtime for this project.
+The test suite covers the existing FPL/electric behavior plus gas loading, gas persistence, TECO/Gas South therm de-duplication, generator EUI exclusion and combined Site EUI math.

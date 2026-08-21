@@ -14,6 +14,7 @@ from sqlalchemy import (
     MetaData,
     String,
     Table,
+    UniqueConstraint,
     create_engine,
     delete,
     insert,
@@ -85,6 +86,51 @@ demand_history_table = Table(
     Column("source_file", String(500), nullable=True),
 )
 
+gas_accounts_table = Table(
+    "gas_accounts",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("provider", String(100), nullable=False),
+    Column("utility_account", String(100), nullable=False),
+    Column("erau_account", String(100), nullable=True),
+    Column("building_id", String(100), nullable=False),
+    Column("account_name", String(300), nullable=True),
+    Column("gas_meter_id", String(100), nullable=True),
+    Column("rate_schedule", String(200), nullable=True),
+    Column("usage_group", String(150), nullable=True),
+    Column("cost_component", String(100), nullable=True),
+    Column("end_use", String(100), nullable=False, default="Building"),
+    Column("usage_authoritative", Boolean, nullable=False, default=True),
+    Column("include_in_site_eui", Boolean, nullable=False, default=True),
+    Column("active", Boolean, nullable=False, default=True),
+    Column("notes", String(1000), nullable=True),
+    UniqueConstraint("provider", "utility_account", name="uq_gas_provider_account"),
+)
+
+
+gas_history_table = Table(
+    "gas_history",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("gas_key", String(350), nullable=False, unique=True),
+    Column("provider", String(100), nullable=False),
+    Column("utility_account", String(100), nullable=False),
+    Column("erau_account", String(100), nullable=True),
+    Column("account_name", String(300), nullable=True),
+    Column("building_id_upload", String(100), nullable=True),
+    Column("bill_month", DateTime, nullable=False),
+    Column("therms", Float, nullable=True),
+    Column("cost", Float, nullable=True),
+    Column("gas_meter_id", String(100), nullable=True),
+    Column("rate_schedule", String(200), nullable=True),
+    Column("usage_group", String(150), nullable=True),
+    Column("cost_component", String(100), nullable=True),
+    Column("end_use", String(100), nullable=True),
+    Column("notes", String(1000), nullable=True),
+    Column("source_file", String(500), nullable=True),
+)
+
+
 
 def get_engine(database_url: str | None = None) -> Engine:
     url = database_url or os.getenv("DATABASE_URL") or DEFAULT_DB
@@ -134,6 +180,7 @@ def _seed_if_empty(engine: Engine) -> None:
     with engine.begin() as conn:
         building_count = conn.execute(select(buildings_table.c.id).limit(1)).first()
         meter_count = conn.execute(select(meters_table.c.id).limit(1)).first()
+        gas_account_count = conn.execute(select(gas_accounts_table.c.id).limit(1)).first()
 
         if building_count is None:
             df = pd.read_csv(DATA_DIR / "buildings_seed.csv", dtype={"property_id": "string"})
@@ -170,6 +217,31 @@ def _seed_if_empty(engine: Engine) -> None:
                 })
             if rows:
                 conn.execute(insert(meters_table), rows)
+
+        if gas_account_count is None:
+            seed_path = DATA_DIR / "gas_accounts_seed.csv"
+            if seed_path.exists():
+                df = pd.read_csv(seed_path, dtype={"utility_account": "string", "erau_account": "string"})
+                rows = []
+                for row in df.to_dict("records"):
+                    rows.append({
+                        "provider": str(row.get("provider") or "").strip().upper(),
+                        "utility_account": str(row.get("utility_account") or "").strip(),
+                        "erau_account": _none_if_nan(row.get("erau_account")),
+                        "building_id": str(row.get("building_id") or "").strip(),
+                        "account_name": _none_if_nan(row.get("account_name")),
+                        "gas_meter_id": _none_if_nan(row.get("gas_meter_id")),
+                        "rate_schedule": _none_if_nan(row.get("rate_schedule")),
+                        "usage_group": _none_if_nan(row.get("usage_group")),
+                        "cost_component": _none_if_nan(row.get("cost_component")),
+                        "end_use": str(row.get("end_use") or "Building").strip(),
+                        "usage_authoritative": _coerce_bool(row.get("usage_authoritative", True)),
+                        "include_in_site_eui": _coerce_bool(row.get("include_in_site_eui", True)),
+                        "active": _coerce_bool(row.get("active", True)),
+                        "notes": _none_if_nan(row.get("notes")),
+                    })
+                if rows:
+                    conn.execute(insert(gas_accounts_table), rows)
 
 
 def load_buildings(engine: Engine, include_inactive: bool = True) -> pd.DataFrame:
@@ -328,3 +400,115 @@ def load_demand_history(engine: Engine) -> pd.DataFrame:
     df["dateBilled"] = pd.to_datetime(df["dateBilled"], errors="coerce")
     df["billMonth"] = df["dateBilled"].dt.to_period("M").dt.to_timestamp()
     return df[[c for c in DEMAND_APP_COLUMNS if c in df.columns]]
+
+
+def ensure_gas_tables(engine: Engine) -> None:
+    """Idempotently create the additive gas schema for older deployments."""
+    gas_accounts_table.create(engine, checkfirst=True)
+    gas_history_table.create(engine, checkfirst=True)
+
+
+def load_gas_accounts(engine: Engine, include_inactive: bool = True) -> pd.DataFrame:
+    ensure_gas_tables(engine)
+    stmt = select(gas_accounts_table)
+    if not include_inactive:
+        stmt = stmt.where(gas_accounts_table.c.active.is_(True))
+    with engine.connect() as conn:
+        rows = conn.execute(stmt.order_by(gas_accounts_table.c.building_id, gas_accounts_table.c.provider)).mappings().all()
+    return pd.DataFrame(rows)
+
+
+def add_gas_account(engine: Engine, values: dict[str, Any]) -> int:
+    ensure_gas_tables(engine)
+    payload = dict(values)
+    payload["provider"] = str(payload["provider"]).strip().upper()
+    payload["utility_account"] = str(payload["utility_account"]).strip()
+    payload["building_id"] = str(payload["building_id"]).strip()
+    payload["active"] = bool(payload.get("active", True))
+    payload["usage_authoritative"] = bool(payload.get("usage_authoritative", True))
+    payload["include_in_site_eui"] = bool(payload.get("include_in_site_eui", True))
+    with engine.begin() as conn:
+        result = conn.execute(insert(gas_accounts_table).values(**payload))
+        return int(result.inserted_primary_key[0])
+
+
+def update_gas_account(engine: Engine, row_id: int, values: dict[str, Any]) -> None:
+    ensure_gas_tables(engine)
+    payload = dict(values)
+    payload.pop("id", None)
+    if "provider" in payload:
+        payload["provider"] = str(payload["provider"]).strip().upper()
+    if "utility_account" in payload:
+        payload["utility_account"] = str(payload["utility_account"]).strip()
+    with engine.begin() as conn:
+        conn.execute(update(gas_accounts_table).where(gas_accounts_table.c.id == row_id).values(**payload))
+
+
+def delete_gas_account(engine: Engine, row_id: int) -> None:
+    ensure_gas_tables(engine)
+    with engine.begin() as conn:
+        conn.execute(delete(gas_accounts_table).where(gas_accounts_table.c.id == row_id))
+
+
+GAS_HISTORY_APP_COLUMNS = [
+    "provider", "utility_account", "erau_account", "account_name", "building_id",
+    "billMonth", "therms", "cost", "gas_meter_id", "rate_schedule", "usage_group",
+    "cost_component", "end_use", "notes", "sourceFile",
+]
+
+def upsert_gas_history(engine: Engine, gas_rows: pd.DataFrame, source_file: str | None = None) -> dict[str, int]:
+    ensure_gas_tables(engine)
+    if gas_rows is None or gas_rows.empty:
+        return {"inserted": 0, "updated": 0}
+    inserted = 0
+    updated_count = 0
+    with engine.begin() as conn:
+        for row in gas_rows.to_dict("records"):
+            provider = str(row.get("provider") or "").strip().upper()
+            account = str(row.get("utility_account") or "").strip()
+            month = pd.to_datetime(row.get("billMonth"), errors="coerce")
+            if not provider or not account or pd.isna(month):
+                continue
+            month = month.to_period("M").to_timestamp()
+            gas_key = f"{provider}|{account}|{month:%Y-%m}"
+            payload = {
+                "gas_key": gas_key,
+                "provider": provider,
+                "utility_account": account,
+                "erau_account": _none_if_nan(row.get("erau_account")),
+                "account_name": _none_if_nan(row.get("account_name")),
+                "building_id_upload": _none_if_nan(row.get("building_id")),
+                "bill_month": month.to_pydatetime(),
+                "therms": _none_if_nan(row.get("therms")),
+                "cost": _none_if_nan(row.get("cost")),
+                "gas_meter_id": _none_if_nan(row.get("gas_meter_id")),
+                "rate_schedule": _none_if_nan(row.get("rate_schedule")),
+                "usage_group": _none_if_nan(row.get("usage_group")),
+                "cost_component": _none_if_nan(row.get("cost_component")),
+                "end_use": _none_if_nan(row.get("end_use")),
+                "notes": _none_if_nan(row.get("notes")),
+                "source_file": source_file,
+            }
+            existing = conn.execute(select(gas_history_table.c.id).where(gas_history_table.c.gas_key == gas_key)).first()
+            if existing is None:
+                conn.execute(insert(gas_history_table).values(**payload))
+                inserted += 1
+            else:
+                conn.execute(update(gas_history_table).where(gas_history_table.c.gas_key == gas_key).values(**payload))
+                updated_count += 1
+    return {"inserted": inserted, "updated": updated_count}
+
+
+def load_gas_history(engine: Engine) -> pd.DataFrame:
+    ensure_gas_tables(engine)
+    with engine.connect() as conn:
+        rows = conn.execute(select(gas_history_table).order_by(gas_history_table.c.bill_month, gas_history_table.c.provider)).mappings().all()
+    if not rows:
+        return pd.DataFrame(columns=GAS_HISTORY_APP_COLUMNS)
+    df = pd.DataFrame(rows).rename(columns={
+        "building_id_upload": "building_id",
+        "bill_month": "billMonth",
+        "source_file": "sourceFile",
+    })
+    df["billMonth"] = pd.to_datetime(df["billMonth"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+    return df[[c for c in GAS_HISTORY_APP_COLUMNS if c in df.columns]]

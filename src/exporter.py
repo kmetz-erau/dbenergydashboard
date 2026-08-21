@@ -50,7 +50,7 @@ def _format_workbook(buffer: BytesIO) -> BytesIO:
                     cell.number_format = "#,##0.0"
                 elif "intensity" in lname:
                     cell.number_format = "0.00"
-                elif "kwh" in lname:
+                elif "kwh" in lname or "therm" in lname:
                     cell.number_format = "#,##0.0"
                 elif "sqft" in lname or lname.endswith("sf"):
                     cell.number_format = "#,##0"
@@ -65,9 +65,18 @@ def build_analysis_workbook(
     buildings: pd.DataFrame,
     meters: pd.DataFrame,
     exceptions: pd.DataFrame | None = None,
+    gas_bundle=None,
+    gas_accounts: pd.DataFrame | None = None,
+    combined_snapshot: pd.DataFrame | None = None,
 ) -> bytes:
+    """Build one analysis workbook.
+
+    Existing FPL sheets remain unchanged. Gas and combined-site sheets are appended
+    only when gas data/reference data are supplied.
+    """
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        # Existing FPL outputs.
         bundle.bills.to_excel(writer, sheet_name="Processed Bill History", index=False)
         bundle.allocated_bills.to_excel(writer, sheet_name="Allocated Bills", index=False)
         bundle.building_monthly.to_excel(writer, sheet_name="Building Monthly", index=False)
@@ -86,4 +95,20 @@ def build_analysis_workbook(
             exceptions.to_excel(writer, sheet_name="Exceptions", index=False)
         buildings.to_excel(writer, sheet_name="Buildings Reference", index=False)
         meters.to_excel(writer, sheet_name="Meters Reference", index=False)
+
+        # Additive gas outputs.
+        if gas_bundle is not None:
+            gas_bundle.history.to_excel(writer, sheet_name="Gas History", index=False)
+            gas_bundle.enriched_history.to_excel(writer, sheet_name="Gas Enriched", index=False)
+            gas_bundle.usage_group_monthly.to_excel(writer, sheet_name="Gas Usage Groups", index=False)
+            gas_bundle.building_monthly.to_excel(writer, sheet_name="Gas Building Monthly", index=False)
+            gas_bundle.building_snapshot.to_excel(writer, sheet_name="Gas Snapshot", index=False)
+            gas_bundle.campus_monthly.to_excel(writer, sheet_name="Gas Campus Monthly", index=False)
+            gas_bundle.provider_summary.to_excel(writer, sheet_name="Gas Providers", index=False)
+            gas_bundle.unmapped_accounts.to_excel(writer, sheet_name="Gas Unmapped", index=False)
+            gas_bundle.fixed_charge_rows.to_excel(writer, sheet_name="Gas Fixed Charges", index=False)
+        if gas_accounts is not None:
+            gas_accounts.to_excel(writer, sheet_name="Gas Accounts Ref", index=False)
+        if combined_snapshot is not None:
+            combined_snapshot.to_excel(writer, sheet_name="Total Site EUI", index=False)
     return _format_workbook(buffer).getvalue()

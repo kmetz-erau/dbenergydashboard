@@ -14,19 +14,26 @@ from sqlalchemy.exc import IntegrityError
 from src.analytics import build_exception_table, run_analytics
 from src.auth import require_password, render_logout_button
 from src.exporter import build_analysis_workbook
+from src.gas_analytics import build_combined_site_snapshot, run_gas_analytics
+from src.gas_loader import gas_template_excel, load_gas_file
 from src.loader import load_monthly_workbook
 from src.reference_io import references_to_excel
 from src.storage import (
     add_building,
     add_meter,
+    add_gas_account,
     get_engine,
     init_database,
     load_buildings,
     load_demand_history,
     load_meters,
+    load_gas_accounts,
+    load_gas_history,
     update_building,
     update_meter,
+    update_gas_account,
     upsert_demand_history,
+    upsert_gas_history,
 )
 
 APP_TITLE = "ERAU Energy Dashboard"
@@ -737,60 +744,336 @@ def meter_form(engine, buildings, meters, bundle=None):
         st.rerun()
 
 
-def render_reference_data(engine, buildings, meters, bundle=None):
+
+def gas_account_form(engine, buildings, gas_accounts):
+    st.subheader("Add a Gas Account")
+    building_choices = buildings[buildings["active"].fillna(True)]["building_id"].tolist() if not buildings.empty else []
+    if not building_choices:
+        st.warning("Add a building before adding a gas account.")
+        return
+
+    with st.form("add_gas_account"):
+        c1, c2, c3 = st.columns(3)
+        provider = c1.selectbox("Provider", ["TECO", "GAS SOUTH", "OTHER"])
+        utility_account = c2.text_input("Utility account number")
+        building_id = c3.selectbox("Building ID", building_choices)
+        c1, c2, c3 = st.columns(3)
+        erau_account = c1.text_input("ERAU account")
+        gas_meter_id = c2.text_input("Gas meter ID")
+        rate_schedule = c3.text_input("Rate schedule")
+        account_name = st.text_input("Account / service name")
+        c1, c2, c3 = st.columns(3)
+        usage_group = c1.text_input("Usage group", help="Use the same group for TECO delivery and Gas South commodity bills that represent the same physical therm usage.")
+        cost_component = c2.selectbox("Cost component", ["Bundled / Utility", "Utility / Delivery", "Supplier / Commodity", "Other", "Unknown"])
+        end_use = c3.selectbox("End use", ["Building", "Generator", "Process", "Unknown"])
+        c1, c2 = st.columns(2)
+        usage_authoritative = c1.checkbox("Authoritative therm source", value=True, help="If multiple provider bills share one usage group, authoritative rows are used for therms while all costs are summed.")
+        include_in_site_eui = c2.checkbox("Include therms in Site EUI", value=end_use != "Generator")
+        notes = st.text_area("Notes")
+        submit = st.form_submit_button("Add gas account", type="primary")
+    if submit:
+        if not utility_account.strip():
+            st.error("Utility account number is required.")
+        else:
+            try:
+                add_gas_account(engine, {
+                    "provider": provider,
+                    "utility_account": utility_account,
+                    "erau_account": erau_account or None,
+                    "building_id": building_id,
+                    "account_name": account_name or None,
+                    "gas_meter_id": gas_meter_id or None,
+                    "rate_schedule": rate_schedule or None,
+                    "usage_group": usage_group or f"{building_id}|{utility_account}",
+                    "cost_component": cost_component,
+                    "end_use": end_use,
+                    "usage_authoritative": usage_authoritative,
+                    "include_in_site_eui": include_in_site_eui,
+                    "active": True,
+                    "notes": notes or None,
+                })
+                st.success(f"Added {provider} account {utility_account}.")
+                st.rerun()
+            except IntegrityError:
+                st.error("That provider/account combination already exists. Use Edit Gas Account instead.")
+
+    if gas_accounts.empty:
+        return
+
+    st.subheader("Edit a Gas Account")
+    labels = [f"{r.id}: {r.provider} {r.utility_account} → {r.building_id}" for r in gas_accounts.itertuples(index=False)]
+    selected = st.selectbox("Gas account to edit", labels, key="edit_gas_account_select")
+    row = gas_accounts.iloc[labels.index(selected)]
+    with st.form("edit_gas_account"):
+        c1, c2, c3 = st.columns(3)
+        provider_edit = c1.text_input("Provider", value=str(row.get("provider") or ""))
+        account_edit = c2.text_input("Utility account", value=str(row.get("utility_account") or ""))
+        building_edit = c3.selectbox("Building", building_choices, index=building_choices.index(row.get("building_id")) if row.get("building_id") in building_choices else 0)
+        c1, c2, c3 = st.columns(3)
+        erau_edit = c1.text_input("ERAU account", value=str(row.get("erau_account") or ""))
+        meter_edit = c2.text_input("Gas meter ID", value=str(row.get("gas_meter_id") or ""))
+        rate_edit = c3.text_input("Rate schedule", value=str(row.get("rate_schedule") or ""))
+        name_edit = st.text_input("Account / service name", value=str(row.get("account_name") or ""))
+        c1, c2, c3 = st.columns(3)
+        usage_edit = c1.text_input("Usage group", value=str(row.get("usage_group") or ""))
+        component_options = ["Bundled / Utility", "Utility / Delivery", "Supplier / Commodity", "Other", "Unknown"]
+        component_current = row.get("cost_component") if row.get("cost_component") in component_options else "Unknown"
+        component_edit = c2.selectbox("Cost component", component_options, index=component_options.index(component_current))
+        end_options = ["Building", "Generator", "Process", "Unknown"]
+        end_current = row.get("end_use") if row.get("end_use") in end_options else "Unknown"
+        end_edit = c3.selectbox("End use", end_options, index=end_options.index(end_current))
+        c1, c2, c3 = st.columns(3)
+        auth_edit = c1.checkbox("Authoritative therm source", value=bool(row.get("usage_authoritative", True)))
+        eui_edit = c2.checkbox("Include in Site EUI", value=bool(row.get("include_in_site_eui", True)))
+        active_edit = c3.checkbox("Active", value=bool(row.get("active", True)))
+        notes_edit = st.text_area("Notes", value=str(row.get("notes") or ""))
+        save = st.form_submit_button("Save gas account changes")
+    if save:
+        update_gas_account(engine, int(row["id"]), {
+            "provider": provider_edit,
+            "utility_account": account_edit,
+            "erau_account": erau_edit or None,
+            "building_id": building_edit,
+            "account_name": name_edit or None,
+            "gas_meter_id": meter_edit or None,
+            "rate_schedule": rate_edit or None,
+            "usage_group": usage_edit or None,
+            "cost_component": component_edit,
+            "end_use": end_edit,
+            "usage_authoritative": auth_edit,
+            "include_in_site_eui": eui_edit,
+            "active": active_edit,
+            "notes": notes_edit or None,
+        })
+        st.success("Gas account updated.")
+        st.rerun()
+
+
+def render_gas(gas_bundle):
+    st.title("Natural Gas")
+    if gas_bundle is None or gas_bundle.history.empty:
+        st.info("No gas history is stored yet. Upload a normalized gas workbook or CSV in the sidebar.")
+        st.download_button(
+            "Download gas upload template",
+            data=gas_template_excel(),
+            file_name="erau_gas_upload_template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        return
+
+    campus = gas_bundle.campus_monthly
+    latest = campus.iloc[-1] if not campus.empty else None
+    if latest is not None:
+        st.caption(f"Latest gas month stored: {latest['billMonth']:%B %Y}")
+        metric_grid([
+            ("Month Gas Cost", currency(latest.get("cost")), pct(latest.get("costChangePct"))),
+            ("Month Therms", number(latest.get("therms"), 1), pct(latest.get("thermsChangePct"))),
+            ("Rolling 12M Gas Cost", currency(latest.get("rolling12Cost")), None),
+            ("Rolling 12M Therms", number(latest.get("rolling12Therms"), 1), None),
+            ("Buildings Represented", str(int(latest.get("buildingCount", 0))), None),
+            ("Stored Invoice Rows", f"{len(gas_bundle.history):,}", None),
+        ])
+
+    if not campus.empty:
+        c1, c2 = st.columns(2)
+        with c1:
+            fig = px.line(campus, x="billMonth", y="cost", markers=True, title="Monthly Natural Gas Cost")
+            fig.update_yaxes(tickprefix="$", separatethousands=True)
+            show_plotly(fig)
+        with c2:
+            fig = px.line(campus, x="billMonth", y="therms", markers=True, title="Monthly Natural Gas Use")
+            fig.update_yaxes(title="Therms", separatethousands=True)
+            show_plotly(fig)
+
+    st.subheader("Building Gas Performance")
+    snapshot = gas_bundle.building_snapshot
+    if not snapshot.empty:
+        cols = [
+            "building_id", "facility_name", "use_type", "area_sqft", "rolling12Therms",
+            "rolling12GasCost", "rolling12GasEUI", "rolling12GasCostPerSF", "thermsChangePct",
+            "costChangePct", "gasEuiRank",
+        ]
+        show_dataframe(snapshot[[c for c in cols if c in snapshot.columns]], height=400)
+
+    st.subheader("Provider / Billing Component Summary")
+    st.caption(
+        "Provider-level therm totals are invoice-line therms and can duplicate the same physical usage when TECO delivery and Gas South commodity bills share a usage group. "
+        "Building therms and Gas EUI are de-duplicated by usage group; provider costs are always summed."
+    )
+    show_dataframe(gas_bundle.provider_summary, height=320)
+
+    if not gas_bundle.fixed_charge_rows.empty:
+        st.subheader("Zero-Usage Bills with Cost")
+        cols = ["billMonth", "provider", "utility_account", "building_id_resolved", "account_name", "therms", "cost", "cost_component"]
+        show_dataframe(gas_bundle.fixed_charge_rows[[c for c in cols if c in gas_bundle.fixed_charge_rows.columns]], height=300)
+
+    st.download_button(
+        "Download gas upload template",
+        data=gas_template_excel(),
+        file_name="erau_gas_upload_template.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+def render_total_site_eui(bundle, gas_bundle, gas_accounts):
+    st.title("Total Site EUI")
+    if bundle is None:
+        st.info("Upload the FPL enhanced workbook to calculate electric and total Site EUI.")
+        return
+    combined = build_combined_site_snapshot(
+        bundle.building_snapshot,
+        gas_bundle.building_snapshot if gas_bundle is not None else pd.DataFrame(),
+        gas_accounts,
+    )
+    if combined.empty:
+        st.info("No building EUI data is available.")
+        return
+
+    st.caption(
+        "Total Site EUI = Electric EUI + Gas EUI. Gas EUI uses de-duplicated physical therm usage. "
+        "Gas accounts marked Include in Site EUI = No (for example, the Student Union generator account) are excluded from Gas EUI by default."
+    )
+    normal = combined[combined["eui_category"].eq("Normal Building") & combined["rolling12SiteEUI"].notna()].copy()
+    if not normal.empty:
+        fig = px.bar(
+            normal.sort_values("rolling12SiteEUI"),
+            x="rolling12SiteEUI",
+            y="building_id",
+            orientation="h",
+            hover_data=["facility_name", "rolling12ElectricEUI", "rolling12GasEUI", "rolling12TotalEnergyCostPerSF", "siteEUIComplete"],
+            title="Rolling 12-Month Total Site EUI (kBtu/sf/year)",
+        )
+        show_plotly(fig, height=max(500, min(1000, 24 * len(normal))))
+
+    cols = [
+        "building_id", "facility_name", "use_type", "area_sqft", "hasGasService",
+        "rolling12ElectricEUI", "rolling12GasEUI", "rolling12SiteEUI", "siteEUIComplete",
+        "rolling12Cost", "rolling12SiteGasCost", "rolling12TotalEnergyCost", "rolling12TotalEnergyCostPerSF",
+    ]
+    show_dataframe(combined[[c for c in cols if c in combined.columns]], height=480)
+
+
+def render_gas_data_quality(gas_bundle):
+    st.divider()
+    st.header("Natural Gas Data Quality")
+    if gas_bundle is None or gas_bundle.history.empty:
+        st.info("No gas history stored yet.")
+        return
+    metric_grid([
+        ("Gas invoice rows", f"{len(gas_bundle.history):,}", None),
+        ("Unmapped gas accounts", f"{len(gas_bundle.unmapped_accounts):,}", None),
+        ("Unregistered gas rows", f"{len(gas_bundle.unregistered_accounts):,}", None),
+        ("Duplicate provider/account/month", f"{len(gas_bundle.duplicate_rows):,}", None),
+        ("Zero-usage bills with cost", f"{len(gas_bundle.fixed_charge_rows):,}", None),
+        ("Gas buildings", f"{gas_bundle.building_snapshot['building_id'].nunique() if not gas_bundle.building_snapshot.empty else 0:,}", None),
+    ])
+    if not gas_bundle.unmapped_accounts.empty:
+        st.subheader("Unmapped Gas Accounts")
+        show_dataframe(gas_bundle.unmapped_accounts, height=320)
+    if not gas_bundle.unregistered_accounts.empty:
+        st.subheader("Gas Rows Not Registered in Reference Data")
+        st.caption("These rows may still map if a valid Building ID was supplied in the upload, but add the provider account in Reference Data for a durable mapping.")
+        show_dataframe(gas_bundle.unregistered_accounts, height=320)
+    if not gas_bundle.duplicate_rows.empty:
+        st.subheader("Duplicate Gas Provider/Account/Month Rows")
+        show_dataframe(gas_bundle.duplicate_rows, height=300)
+
+
+def render_reference_data(engine, buildings, meters, gas_accounts, bundle=None):
     st.title("Reference Data")
-    st.write("Add buildings and meters here. These records drive meter-to-building allocation, rate schedule analysis, square footage, and EUI.")
+    st.write("Add buildings, electric/gas meters, and gas provider accounts here. Existing FPL mapping behavior is unchanged.")
 
     persistence = secret_or_env("DATABASE_URL")
     if not persistence:
-        st.warning("This deployment is using the local SQLite database. It is persistent on your computer, but hosted Streamlit deployments should set DATABASE_URL to hosted Postgres so edits survive redeploys/restarts.")
+        st.warning("This deployment is using the local SQLite database. Hosted Streamlit deployments should set DATABASE_URL to hosted Postgres so edits and gas history survive redeploys/restarts.")
 
-    ref_bytes = references_to_excel(buildings, meters)
+    ref_bytes = references_to_excel(buildings, meters, gas_accounts)
     st.download_button("Download reference tables", data=ref_bytes, file_name="erau_energy_reference_tables.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button("Download gas upload template", data=gas_template_excel(), file_name="erau_gas_upload_template.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     st.subheader("Current Buildings")
-    show_dataframe(buildings, height=360)
+    show_dataframe(buildings, height=320)
     st.subheader("Current Meter Mappings")
-    show_dataframe(meters, height=360)
+    show_dataframe(meters, height=320)
+    st.subheader("Current Gas Accounts")
+    show_dataframe(gas_accounts, height=320)
 
     if not admin_allowed():
         return
 
-    tab1, tab2 = st.tabs(["Buildings", "Meters"])
+    tab1, tab2, tab3 = st.tabs(["Buildings", "Meters", "Gas Accounts"])
     with tab1:
         building_form(engine, buildings)
     with tab2:
         meter_form(engine, buildings, meters, bundle)
+    with tab3:
+        gas_account_form(engine, buildings, gas_accounts)
 
 
-def render_downloads(bundle, buildings, meters):
+def render_downloads(bundle, buildings, meters, gas_bundle=None, gas_accounts=None):
     st.title("Downloads")
-    exceptions = build_exception_table(bundle, 0.15, 0.15, 0.10)
-    workbook = build_analysis_workbook(bundle, buildings, meters, exceptions)
+    if bundle is not None:
+        exceptions = build_exception_table(bundle, 0.15, 0.15, 0.10)
+        combined = build_combined_site_snapshot(
+            bundle.building_snapshot,
+            gas_bundle.building_snapshot if gas_bundle is not None else pd.DataFrame(),
+            gas_accounts if gas_accounts is not None else pd.DataFrame(),
+        )
+        workbook = build_analysis_workbook(
+            bundle,
+            buildings,
+            meters,
+            exceptions,
+            gas_bundle=gas_bundle,
+            gas_accounts=gas_accounts,
+            combined_snapshot=combined,
+        )
+        st.download_button(
+            "Download analyzed workbook",
+            data=workbook,
+            file_name="erau_energy_dashboard_analysis.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+        )
+        st.download_button(
+            "Download building EUI snapshot CSV",
+            data=bundle.building_snapshot.to_csv(index=False).encode("utf-8"),
+            file_name="building_eui_snapshot.csv",
+            mime="text/csv",
+        )
+        st.download_button(
+            "Download demand snapshot CSV",
+            data=bundle.building_demand_snapshot.to_csv(index=False).encode("utf-8"),
+            file_name="building_demand_snapshot.csv",
+            mime="text/csv",
+        )
+        st.download_button(
+            "Download mapping exceptions CSV",
+            data=bundle.unmapped_meters.to_csv(index=False).encode("utf-8"),
+            file_name="unmapped_meters.csv",
+            mime="text/csv",
+        )
+    else:
+        st.info("Upload an FPL workbook to generate the combined analyzed Excel workbook.")
+
+    if gas_bundle is not None and not gas_bundle.history.empty:
+        st.download_button(
+            "Download gas history CSV",
+            data=gas_bundle.history.to_csv(index=False).encode("utf-8"),
+            file_name="gas_history.csv",
+            mime="text/csv",
+        )
+        st.download_button(
+            "Download gas building snapshot CSV",
+            data=gas_bundle.building_snapshot.to_csv(index=False).encode("utf-8"),
+            file_name="gas_building_snapshot.csv",
+            mime="text/csv",
+        )
     st.download_button(
-        "Download analyzed workbook",
-        data=workbook,
-        file_name="erau_energy_dashboard_analysis.xlsx",
+        "Download gas upload template",
+        data=gas_template_excel(),
+        file_name="erau_gas_upload_template.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
-    )
-    st.download_button(
-        "Download building EUI snapshot CSV",
-        data=bundle.building_snapshot.to_csv(index=False).encode("utf-8"),
-        file_name="building_eui_snapshot.csv",
-        mime="text/csv",
-    )
-    st.download_button(
-        "Download demand snapshot CSV",
-        data=bundle.building_demand_snapshot.to_csv(index=False).encode("utf-8"),
-        file_name="building_demand_snapshot.csv",
-        mime="text/csv",
-    )
-    st.download_button(
-        "Download mapping exceptions CSV",
-        data=bundle.unmapped_meters.to_csv(index=False).encode("utf-8"),
-        file_name="unmapped_meters.csv",
-        mime="text/csv",
     )
 
 
@@ -800,20 +1083,60 @@ def main():
     database_url = secret_or_env("DATABASE_URL")
     engine = database_engine(database_url)
 
-    # Idempotent schema upgrade on every run. This preserves all existing rows
-    # while creating newly-added tables such as demand_history when required.
+    # Idempotent additive schema upgrades. Existing FPL tables/data are preserved.
     init_database(engine, seed=True)
 
     buildings = load_buildings(engine, include_inactive=True)
     meters = load_meters(engine, include_inactive=True)
+    gas_accounts = load_gas_accounts(engine, include_inactive=True)
 
     st.sidebar.title("⚡ ERAU Energy")
-    uploaded = st.sidebar.file_uploader("Upload monthly enhanced FPL workbook", type=["xlsx"])
+    uploaded = st.sidebar.file_uploader("Upload monthly enhanced FPL workbook", type=["xlsx"], key="fpl_upload")
+    st.sidebar.divider()
+    gas_month_default = st.sidebar.date_input(
+        "Gas bill month",
+        value=pd.Timestamp.today().to_period("M").to_timestamp().date(),
+        help="Applied to every row in the monthly gas upload. The file only needs Utility Account, Cost, and Therms.",
+    )
+    gas_uploaded = st.sidebar.file_uploader(
+        "Upload monthly gas file",
+        type=["xlsx", "csv"],
+        key="gas_upload",
+        help="Required columns: Utility Account, Cost, Therms.",
+    )
+
     page = st.sidebar.radio(
         "Dashboard",
-        ["Overview", "Cost & Usage", "Demand", "Building EUI", "Variance & Exceptions", "Data Quality", "Reference Data", "Downloads"],
+        [
+            "Overview", "Cost & Usage", "Demand", "Building EUI", "Variance & Exceptions",
+            "Natural Gas", "Total Site EUI", "Data Quality", "Reference Data", "Downloads",
+        ],
     )
     render_logout_button()
+
+    # Gas is a parallel additive stream and is persisted independently of FPL.
+    if gas_uploaded is not None:
+        try:
+            gas_raw = gas_uploaded.getvalue()
+            gas_result = load_gas_file(
+                gas_raw,
+                gas_uploaded.name,
+                default_month=gas_month_default,
+                gas_accounts=gas_accounts,
+            )
+            gas_hash = hashlib.sha256(gas_raw + str(gas_month_default).encode("utf-8")).hexdigest()
+            if st.session_state.get("saved_gas_upload_hash") != gas_hash:
+                stats = upsert_gas_history(engine, gas_result.rows, gas_uploaded.name)
+                st.session_state["saved_gas_upload_hash"] = gas_hash
+                st.session_state["gas_save_stats"] = stats
+            st.sidebar.success(f"Gas: loaded {len(gas_result.rows):,} invoice rows")
+        except Exception as exc:
+            st.error(f"Could not process gas upload: {exc}")
+
+    gas_history = load_gas_history(engine)
+    gas_bundle = run_gas_analytics(gas_history, gas_accounts, buildings) if not gas_history.empty else None
+    if gas_bundle is not None:
+        st.sidebar.caption(f"Gas history: {len(gas_history):,} stored rows · {gas_history['utility_account'].nunique()} accounts")
 
     bundle = None
     if uploaded is not None:
@@ -821,9 +1144,7 @@ def main():
             raw = uploaded.getvalue()
             result = load_monthly_workbook(raw, uploaded.name)
 
-            # The enhanced workbook normally contains only the demand-bearing PDFs
-            # selected for the current run. Persist those normalized demand records
-            # so the dashboard builds month-over-month demand history over time.
+            # Existing FPL demand persistence behavior is unchanged.
             upload_hash = hashlib.sha256(raw).hexdigest()
             if not result.demand.empty and st.session_state.get("saved_demand_upload_hash") != upload_hash:
                 demand_save = upsert_demand_history(engine, result.demand, uploaded.name)
@@ -832,7 +1153,7 @@ def main():
 
             demand_history = load_demand_history(engine)
             bundle = run_analytics(result.bills, buildings, meters, demand_history)
-            st.sidebar.success(f"Loaded {len(result.bills):,} bill rows")
+            st.sidebar.success(f"FPL: loaded {len(result.bills):,} bill rows")
             st.sidebar.caption(f"{result.bills['accountNumber'].nunique()} accounts · {result.bills['fullMeterID'].replace('', pd.NA).nunique()} meters")
             if not result.demand.empty:
                 st.sidebar.caption(f"{len(result.demand):,} demand records extracted this upload")
@@ -840,23 +1161,50 @@ def main():
             st.error(f"Could not process workbook: {exc}")
             bundle = None
     else:
-        st.sidebar.info("Upload the latest monthly workbook to populate analytics.")
+        st.sidebar.info("Upload the latest FPL workbook to populate electricity analytics.")
 
     if page == "Reference Data":
-        render_reference_data(engine, buildings, meters, bundle)
+        render_reference_data(engine, buildings, meters, gas_accounts, bundle)
+        return
+
+    if page == "Natural Gas":
+        render_gas(gas_bundle)
+        return
+
+    if page == "Total Site EUI":
+        render_total_site_eui(bundle, gas_bundle, gas_accounts)
+        return
+
+    if page == "Data Quality":
+        if bundle is not None:
+            render_data_quality(bundle)
+        else:
+            st.title("Data Quality")
+            st.info("Upload the FPL workbook to see electricity data-quality checks.")
+        render_gas_data_quality(gas_bundle)
+        return
+
+    if page == "Downloads":
+        render_downloads(bundle, buildings, meters, gas_bundle, gas_accounts)
         return
 
     if bundle is None:
         st.title(APP_TITLE)
-        st.write("Upload the enhanced FPL workbook in the sidebar. You can manage buildings and meters at any time from **Reference Data**.")
+        st.write("Upload the enhanced FPL workbook in the sidebar for electricity analytics. Natural gas can be uploaded independently and remains stored in the dashboard database.")
         st.subheader("Monthly workflow")
         st.markdown(
             "1. Upload the latest enhanced FPL `.xlsx` file.\n"
-            "2. The app validates Bill History and reconstructs FPL meter IDs.\n"
-            "3. Meters map to buildings, square footage, utility and rate schedule.\n"
-            "4. The dashboard calculates cost, usage, demand, variance, kWh/sf, $/sf and electric EUI.\n"
-            "5. Demand records are retained so month-over-month peak-demand variance builds over time.\n"
-            "6. New/unmapped meters are surfaced for review and can be added in Reference Data."
+            "2. Select the Gas bill month and optionally upload a gas file containing only Utility Account, Cost, and Therms.\n"
+            "3. Existing FPL processing continues unchanged: bill history, demand, variance, electric EUI, and meter mapping.\n"
+            "4. Gas invoices are stored separately, mapped through Gas Accounts, and de-duplicated by physical usage group.\n"
+            "5. Review Natural Gas and Total Site EUI for gas cost, therms, Gas EUI, and combined Site EUI.\n"
+            "6. Add new buildings, meters, and gas accounts in Reference Data."
+        )
+        st.download_button(
+            "Download gas upload template",
+            data=gas_template_excel(),
+            file_name="erau_gas_upload_template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         return
 
@@ -870,10 +1218,6 @@ def main():
         render_eui(bundle)
     elif page == "Variance & Exceptions":
         render_variance(bundle)
-    elif page == "Data Quality":
-        render_data_quality(bundle)
-    elif page == "Downloads":
-        render_downloads(bundle, buildings, meters)
 
 
 if __name__ == "__main__":
