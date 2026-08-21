@@ -212,3 +212,34 @@ def test_combined_site_eui_adds_electric_and_gas_and_respects_missing_gas():
     b2 = out[out["building_id"] == "Building 2"].iloc[0]
     assert b1["rolling12SiteEUI"] == pytest.approx(60.0)
     assert b2["rolling12SiteEUI"] == pytest.approx(40.0)
+
+
+def test_gas_history_loader_accepts_multiple_months_without_sidebar_default():
+    refs = _gas_refs()
+    raw = pd.DataFrame({
+        "Billing Month": ["2026-06-01", "2026-07-01"],
+        "Utility Account": ["221009610710", "221009610710"],
+        "Cost": [100.0, 120.0],
+        "Therms": [50.0, 55.0],
+    })
+    out = normalize_gas_upload(raw, gas_accounts=refs)
+    assert len(out) == 2
+    assert out["billMonth"].dt.strftime("%Y-%m").tolist() == ["2026-06", "2026-07"]
+
+
+def test_gas_history_requires_billing_month_when_no_default():
+    raw = pd.DataFrame({
+        "Utility Account": ["221009610710"],
+        "Cost": [100.0],
+        "Therms": [50.0],
+    })
+    with pytest.raises(ValueError, match="Billing Month"):
+        normalize_gas_upload(raw, gas_accounts=_gas_refs())
+
+
+def test_seed_migration_adds_historical_gas_accounts_without_overwriting_existing(tmp_path):
+    engine = get_engine(f"sqlite:///{tmp_path / 'gas_hist_seed.db'}")
+    init_database(engine, seed=True)
+    accounts = load_gas_accounts(engine, include_inactive=True)
+    assert ((accounts["provider"] == "TECO") & (accounts["utility_account"] == "211009956130")).any()
+    assert ((accounts["provider"] == "GAS SOUTH") & (accounts["utility_account"] == "4933635109")).any()

@@ -218,30 +218,41 @@ def _seed_if_empty(engine: Engine) -> None:
             if rows:
                 conn.execute(insert(meters_table), rows)
 
-        if gas_account_count is None:
-            seed_path = DATA_DIR / "gas_accounts_seed.csv"
-            if seed_path.exists():
-                df = pd.read_csv(seed_path, dtype={"utility_account": "string", "erau_account": "string"})
-                rows = []
-                for row in df.to_dict("records"):
-                    rows.append({
-                        "provider": str(row.get("provider") or "").strip().upper(),
-                        "utility_account": str(row.get("utility_account") or "").strip(),
-                        "erau_account": _none_if_nan(row.get("erau_account")),
-                        "building_id": str(row.get("building_id") or "").strip(),
-                        "account_name": _none_if_nan(row.get("account_name")),
-                        "gas_meter_id": _none_if_nan(row.get("gas_meter_id")),
-                        "rate_schedule": _none_if_nan(row.get("rate_schedule")),
-                        "usage_group": _none_if_nan(row.get("usage_group")),
-                        "cost_component": _none_if_nan(row.get("cost_component")),
-                        "end_use": str(row.get("end_use") or "Building").strip(),
-                        "usage_authoritative": _coerce_bool(row.get("usage_authoritative", True)),
-                        "include_in_site_eui": _coerce_bool(row.get("include_in_site_eui", True)),
-                        "active": _coerce_bool(row.get("active", True)),
-                        "notes": _none_if_nan(row.get("notes")),
-                    })
-                if rows:
-                    conn.execute(insert(gas_accounts_table), rows)
+        # Gas reference seeds are additive. Insert only missing provider/account
+        # pairs on every startup so historical account mappings added in later
+        # releases become available without overwriting user-edited records.
+        seed_path = DATA_DIR / "gas_accounts_seed.csv"
+        if seed_path.exists():
+            df = pd.read_csv(seed_path, dtype={"utility_account": "string", "erau_account": "string"})
+            existing_gas = set(
+                (str(r[0]).strip().upper(), str(r[1]).strip())
+                for r in conn.execute(select(gas_accounts_table.c.provider, gas_accounts_table.c.utility_account)).all()
+            )
+            rows = []
+            for row in df.to_dict("records"):
+                provider = str(row.get("provider") or "").strip().upper()
+                utility_account = str(row.get("utility_account") or "").strip()
+                if not provider or not utility_account or (provider, utility_account) in existing_gas:
+                    continue
+                rows.append({
+                    "provider": provider,
+                    "utility_account": utility_account,
+                    "erau_account": _none_if_nan(row.get("erau_account")),
+                    "building_id": str(row.get("building_id") or "").strip(),
+                    "account_name": _none_if_nan(row.get("account_name")),
+                    "gas_meter_id": _none_if_nan(row.get("gas_meter_id")),
+                    "rate_schedule": _none_if_nan(row.get("rate_schedule")),
+                    "usage_group": _none_if_nan(row.get("usage_group")),
+                    "cost_component": _none_if_nan(row.get("cost_component")),
+                    "end_use": str(row.get("end_use") or "Building").strip(),
+                    "usage_authoritative": _coerce_bool(row.get("usage_authoritative", True)),
+                    "include_in_site_eui": _coerce_bool(row.get("include_in_site_eui", True)),
+                    "active": _coerce_bool(row.get("active", True)),
+                    "notes": _none_if_nan(row.get("notes")),
+                })
+                existing_gas.add((provider, utility_account))
+            if rows:
+                conn.execute(insert(gas_accounts_table), rows)
 
 
 def load_buildings(engine: Engine, include_inactive: bool = True) -> pd.DataFrame:

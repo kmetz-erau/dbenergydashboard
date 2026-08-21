@@ -8,9 +8,9 @@ import numpy as np
 import pandas as pd
 
 
-# Internal normalized schema. Monthly users only need to upload
-# Utility Account, Cost, and Therms. The remaining fields are resolved from
-# Reference Data -> Gas Accounts.
+# Internal normalized schema. The preferred upload is one cumulative Gas History
+# workbook with Billing Month, Utility Account, Cost, and Therms. The remaining
+# fields are resolved from Reference Data -> Gas Accounts.
 NORMALIZED_COLUMNS = [
     "billMonth",
     "provider",
@@ -148,8 +148,7 @@ def _apply_reference_data(out: pd.DataFrame, gas_accounts: pd.DataFrame | None) 
     if ref.empty:
         if "provider" not in out.columns or out["provider"].map(_clean_string).isna().any():
             raise ValueError(
-                "Gas account reference data is required when the upload contains only "
-                "Utility Account, Cost, and Therms. Add the account under "
+                "Gas account reference data is required for gas history uploads. Add the account under "
                 "Reference Data > Gas Accounts and try again."
             )
         return out
@@ -224,16 +223,17 @@ def normalize_gas_upload(
     default_month=None,
     gas_accounts: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Normalize a monthly gas upload.
+    """Normalize a cumulative gas-history upload.
 
-    Monthly upload requirements are intentionally minimal:
+    Preferred workbook columns:
+      * Billing Month
       * Utility Account
       * Cost
       * Therms
 
-    The selected ``default_month`` supplies the bill month for rows that do not
-    contain a legacy billMonth column. Provider/building/meter metadata are
-    looked up from the Gas Accounts reference table using Utility Account.
+    ``default_month`` is retained only for backwards compatibility with the older
+    three-column monthly upload. Provider/building/meter metadata are looked up
+    from the Gas Accounts reference table using Utility Account.
     """
     if df is None or df.empty:
         return pd.DataFrame(columns=NORMALIZED_COLUMNS + ["lineCostPerTherm"])
@@ -252,7 +252,7 @@ def normalize_gas_upload(
     if missing:
         raise ValueError(
             "Gas upload is missing required columns: " + ", ".join(missing)
-            + ". The monthly gas file only needs Utility Account, Cost, and Therms."
+            + ". The history workbook requires Billing Month, Utility Account, Cost, and Therms."
         )
 
     # Keep only recognized columns so stray spreadsheet notes do not enter the
@@ -264,12 +264,15 @@ def normalize_gas_upload(
         if col not in out.columns:
             out[col] = np.nan
 
-    # Monthly workflow: month is chosen in the Streamlit sidebar. Legacy files
-    # with billMonth are still accepted, but the sidebar month is used when it is
-    # not present.
+    # Preferred workflow: every row carries its Billing Month so a single file
+    # can hold all history. A supplied default_month keeps old three-column files
+    # compatible, but the Streamlit UI no longer requires a separate month picker.
     if out["billMonth"].isna().all():
         if default_month is None:
-            raise ValueError("Select the Gas bill month in the sidebar before uploading the gas file.")
+            raise ValueError(
+                "Gas history workbook is missing Billing Month. Required columns are "
+                "Billing Month, Utility Account, Cost, and Therms."
+            )
         out["billMonth"] = pd.Timestamp(default_month)
 
     out["billMonth"] = pd.to_datetime(out["billMonth"], errors="coerce").dt.to_period("M").dt.to_timestamp()
@@ -338,23 +341,25 @@ def load_gas_file(
 
 
 def gas_template_excel() -> bytes:
-    """Return the minimal monthly gas upload template."""
+    """Return the preferred cumulative gas-history upload template."""
     output = BytesIO()
-    template = pd.DataFrame(columns=["Utility Account", "Cost", "Therms"])
+    template = pd.DataFrame(columns=["Billing Month", "Utility Account", "Cost", "Therms"])
     instructions = pd.DataFrame(
         {
             "Item": [
+                "Billing Month",
                 "Utility Account",
                 "Cost",
                 "Therms",
-                "Gas Bill Month",
+                "Monthly Update",
                 "Account Mapping",
             ],
             "Guidance": [
+                "Required. Enter the billing month as a date, preferably the first day of the month (for example 8/1/2026).",
                 "Required. Enter the TECO, Gas South, or other utility account number exactly as registered in the dashboard.",
-                "Required. Total invoice cost in dollars for that utility account for the selected month.",
+                "Required. Total invoice cost in dollars for that utility account and billing month.",
                 "Required. Therms shown on the invoice. Enter 0 when there is no usage but a fixed charge remains.",
-                "Do not add this as a spreadsheet column. Select the month in the Streamlit sidebar before uploading.",
+                "Append each new month to the bottom of this same workbook. Keep all prior months and re-upload the full file.",
                 "Provider, building, meter, rate, end use, and TECO/Gas South pairing are looked up automatically from Reference Data > Gas Accounts.",
             ],
         }
@@ -362,15 +367,43 @@ def gas_template_excel() -> bytes:
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         template.to_excel(writer, sheet_name="Gas History", index=False)
         instructions.to_excel(writer, sheet_name="Instructions", index=False)
-
-        # Keep the template easy to use without adding visual complexity.
         ws = writer.book["Gas History"]
         ws.freeze_panes = "A2"
-        ws.column_dimensions["A"].width = 24
-        ws.column_dimensions["B"].width = 16
+        ws.column_dimensions["A"].width = 16
+        ws.column_dimensions["B"].width = 24
         ws.column_dimensions["C"].width = 16
+        ws.column_dimensions["D"].width = 16
         wi = writer.book["Instructions"]
         wi.column_dimensions["A"].width = 22
         wi.column_dimensions["B"].width = 105
+    return output.getvalue()
 
+
+def gas_history_excel(history: pd.DataFrame | None) -> bytes:
+    """Export stored gas history in the same four-column re-uploadable format."""
+    output = BytesIO()
+    if history is None or history.empty:
+        export = pd.DataFrame(columns=["Billing Month", "Utility Account", "Cost", "Therms"])
+    else:
+        export = history.copy()
+        export["Billing Month"] = pd.to_datetime(export.get("billMonth"), errors="coerce").dt.to_period("M").dt.to_timestamp()
+        export["Utility Account"] = export.get("utility_account", pd.Series(index=export.index, dtype=object)).astype(str)
+        export["Cost"] = pd.to_numeric(export.get("cost"), errors="coerce")
+        export["Therms"] = pd.to_numeric(export.get("therms"), errors="coerce")
+        export = export[["Billing Month", "Utility Account", "Cost", "Therms"]]
+        export = export.sort_values(["Billing Month", "Utility Account"]).reset_index(drop=True)
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        export.to_excel(writer, sheet_name="Gas History", index=False)
+        ws = writer.book["Gas History"]
+        ws.freeze_panes = "A2"
+        ws.column_dimensions["A"].width = 16
+        ws.column_dimensions["B"].width = 24
+        ws.column_dimensions["C"].width = 16
+        ws.column_dimensions["D"].width = 16
+        for row in range(2, ws.max_row + 1):
+            ws.cell(row, 1).number_format = "mmm yyyy"
+            ws.cell(row, 2).number_format = "@"
+            ws.cell(row, 3).number_format = "$#,##0.00;[Red]($#,##0.00);-"
+            ws.cell(row, 4).number_format = "#,##0.00;[Red](#,##0.00);-"
     return output.getvalue()

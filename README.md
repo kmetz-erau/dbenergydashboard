@@ -154,8 +154,8 @@ The startup migration is additive: existing buildings, meters, FPL behavior and 
 
 1. Run the FPL collector and create the enhanced FPL workbook.
 2. Open the dashboard and upload the FPL workbook exactly as before.
-3. Select the Gas bill month and prepare the monthly gas file using only **Utility Account, Cost, and Therms**.
-4. Upload the three-column gas workbook/CSV separately.
+3. Keep one cumulative gas-history workbook and append the new month using **Billing Month, Utility Account, Cost, and Therms**.
+4. Upload that same cumulative gas-history workbook. Existing month/account rows are updated and new rows are inserted.
 5. Review **Natural Gas** for therms/cost/provider analytics.
 6. Review **Total Site EUI** for combined building energy intensity.
 7. Review **Data Quality** for new FPL meters and new/unmapped gas accounts.
@@ -165,7 +165,7 @@ The FPL workbook itself is processed in memory as before. Demand history and gas
 
 ## Gas upload format
 
-The monthly gas upload is intentionally minimal. The app accepts `.xlsx` or `.csv`.
+The gas upload is one cumulative history file. Append new monthly rows to the same workbook and re-upload it. The app accepts `.xlsx` or `.csv`.
 
 For Excel, use a sheet named one of:
 
@@ -176,17 +176,18 @@ For Excel, use a sheet named one of:
 
 If none of those exist, the first sheet is used.
 
-### Required columns — only these three
+### Required columns — only these four
 
 ```text
+Billing Month
 Utility Account
 Cost
 Therms
 ```
 
-Select the **Gas bill month** in the Streamlit sidebar before uploading. The selected month is stored with the uploaded rows, so the spreadsheet does not need a date/month column.
+The billing month is stored in the workbook itself, so there is no separate gas-month selector in the dashboard.
 
-`Utility Account` is the lookup key. The dashboard automatically pulls the following from **Reference Data → Gas Accounts**:
+`Billing Month + Utility Account` is the unique history key. `Utility Account` is the reference-data lookup key. The dashboard automatically pulls the following from **Reference Data → Gas Accounts**:
 
 - provider (TECO, Gas South, etc.);
 - building;
@@ -199,9 +200,9 @@ Select the **Gas bill month** in the Streamlit sidebar before uploading. The sel
 - whether the account is authoritative for therms;
 - whether the gas is included in Site EUI.
 
-If an uploaded Utility Account is not registered, the gas import stops and lists the missing account number(s). Add them under **Reference Data → Gas Accounts**, then upload the same monthly file again. This prevents the app from guessing a building or provider.
+If an uploaded Utility Account is not registered, the gas import stops and lists the missing account number(s). Add them under **Reference Data → Gas Accounts**, then upload the same history workbook again. This prevents the app from guessing a building or provider.
 
-The template is available from the dashboard Downloads page and in `data/gas_upload_template.xlsx`.
+A blank template is available from the dashboard Downloads page and in `data/gas_upload_template.xlsx`. The repo also includes `data/ERAU_Gas_History.xlsx`, preloaded with the supplied FY25/26 history, as the recommended file to keep and append each month.
 
 ## Gas reference accounts
 

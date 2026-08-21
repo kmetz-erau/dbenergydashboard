@@ -15,7 +15,7 @@ from src.analytics import build_exception_table, run_analytics
 from src.auth import require_password, render_logout_button
 from src.exporter import build_analysis_workbook
 from src.gas_analytics import build_combined_site_snapshot, run_gas_analytics
-from src.gas_loader import gas_template_excel, load_gas_file
+from src.gas_loader import gas_history_excel, gas_template_excel, load_gas_file
 from src.loader import load_monthly_workbook
 from src.reference_io import references_to_excel
 from src.storage import (
@@ -854,9 +854,9 @@ def render_gas(gas_bundle):
     if gas_bundle is None or gas_bundle.history.empty:
         st.info("No gas history is stored yet. Upload a normalized gas workbook or CSV in the sidebar.")
         st.download_button(
-            "Download gas upload template",
+            "Download blank gas history template",
             data=gas_template_excel(),
-            file_name="erau_gas_upload_template.xlsx",
+            file_name="erau_gas_history_template.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         return
@@ -908,9 +908,9 @@ def render_gas(gas_bundle):
         show_dataframe(gas_bundle.fixed_charge_rows[[c for c in cols if c in gas_bundle.fixed_charge_rows.columns]], height=300)
 
     st.download_button(
-        "Download gas upload template",
+        "Download blank gas history template",
         data=gas_template_excel(),
-        file_name="erau_gas_upload_template.xlsx",
+        file_name="erau_gas_history_template.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
@@ -989,7 +989,7 @@ def render_reference_data(engine, buildings, meters, gas_accounts, bundle=None):
 
     ref_bytes = references_to_excel(buildings, meters, gas_accounts)
     st.download_button("Download reference tables", data=ref_bytes, file_name="erau_energy_reference_tables.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    st.download_button("Download gas upload template", data=gas_template_excel(), file_name="erau_gas_upload_template.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button("Download blank gas history template", data=gas_template_excel(), file_name="erau_gas_history_template.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     st.subheader("Current Buildings")
     show_dataframe(buildings, height=320)
@@ -1058,6 +1058,13 @@ def render_downloads(bundle, buildings, meters, gas_bundle=None, gas_accounts=No
 
     if gas_bundle is not None and not gas_bundle.history.empty:
         st.download_button(
+            "Download current gas history workbook",
+            data=gas_history_excel(gas_bundle.history),
+            file_name="ERAU_Gas_History.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+        )
+        st.download_button(
             "Download gas history CSV",
             data=gas_bundle.history.to_csv(index=False).encode("utf-8"),
             file_name="gas_history.csv",
@@ -1070,9 +1077,9 @@ def render_downloads(bundle, buildings, meters, gas_bundle=None, gas_accounts=No
             mime="text/csv",
         )
     st.download_button(
-        "Download gas upload template",
+        "Download blank gas history template",
         data=gas_template_excel(),
-        file_name="erau_gas_upload_template.xlsx",
+        file_name="erau_gas_history_template.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
@@ -1093,16 +1100,11 @@ def main():
     st.sidebar.title("⚡ ERAU Energy")
     uploaded = st.sidebar.file_uploader("Upload monthly enhanced FPL workbook", type=["xlsx"], key="fpl_upload")
     st.sidebar.divider()
-    gas_month_default = st.sidebar.date_input(
-        "Gas bill month",
-        value=pd.Timestamp.today().to_period("M").to_timestamp().date(),
-        help="Applied to every row in the monthly gas upload. The file only needs Utility Account, Cost, and Therms.",
-    )
     gas_uploaded = st.sidebar.file_uploader(
-        "Upload monthly gas file",
+        "Upload gas history workbook",
         type=["xlsx", "csv"],
         key="gas_upload",
-        help="Required columns: Utility Account, Cost, Therms.",
+        help="Keep one cumulative file and append each month. Required columns: Billing Month, Utility Account, Cost, Therms.",
     )
 
     page = st.sidebar.radio(
@@ -1121,15 +1123,21 @@ def main():
             gas_result = load_gas_file(
                 gas_raw,
                 gas_uploaded.name,
-                default_month=gas_month_default,
                 gas_accounts=gas_accounts,
             )
-            gas_hash = hashlib.sha256(gas_raw + str(gas_month_default).encode("utf-8")).hexdigest()
+            gas_hash = hashlib.sha256(gas_raw).hexdigest()
             if st.session_state.get("saved_gas_upload_hash") != gas_hash:
                 stats = upsert_gas_history(engine, gas_result.rows, gas_uploaded.name)
                 st.session_state["saved_gas_upload_hash"] = gas_hash
                 st.session_state["gas_save_stats"] = stats
-            st.sidebar.success(f"Gas: loaded {len(gas_result.rows):,} invoice rows")
+            month_min = gas_result.rows["billMonth"].min()
+            month_max = gas_result.rows["billMonth"].max()
+            st.sidebar.success(f"Gas: synced {len(gas_result.rows):,} history rows")
+            if pd.notna(month_min) and pd.notna(month_max):
+                st.sidebar.caption(f"{month_min:%b %Y} through {month_max:%b %Y}")
+            if st.session_state.get("gas_save_stats"):
+                s = st.session_state["gas_save_stats"]
+                st.sidebar.caption(f"Database sync: {s.get('inserted', 0):,} inserted · {s.get('updated', 0):,} updated")
         except Exception as exc:
             st.error(f"Could not process gas upload: {exc}")
 
@@ -1194,16 +1202,16 @@ def main():
         st.subheader("Monthly workflow")
         st.markdown(
             "1. Upload the latest enhanced FPL `.xlsx` file.\n"
-            "2. Select the Gas bill month and optionally upload a gas file containing only Utility Account, Cost, and Therms.\n"
+            "2. Optionally upload the cumulative gas history workbook containing Billing Month, Utility Account, Cost, and Therms.\n"
             "3. Existing FPL processing continues unchanged: bill history, demand, variance, electric EUI, and meter mapping.\n"
             "4. Gas invoices are stored separately, mapped through Gas Accounts, and de-duplicated by physical usage group.\n"
             "5. Review Natural Gas and Total Site EUI for gas cost, therms, Gas EUI, and combined Site EUI.\n"
             "6. Add new buildings, meters, and gas accounts in Reference Data."
         )
         st.download_button(
-            "Download gas upload template",
+            "Download blank gas history template",
             data=gas_template_excel(),
-            file_name="erau_gas_upload_template.xlsx",
+            file_name="erau_gas_history_template.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         return
