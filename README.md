@@ -355,3 +355,40 @@ When `electric_account_mapping` is present, it takes precedence over the reposit
 4. The dashboard reads the database directly for that session.
 
 The Excel FPL importer remains available under **Excel import fallback** for seeding or repairing the dashboard's built-in storage.
+
+## Portable DuckDB workflow (FPL + Natural Gas)
+
+The dashboard can use a single uploaded `energy.duckdb` as its primary data source.
+Supported tables are:
+
+- `fpl_bills`
+- `fpl_demand`
+- `gas_bills`
+- `electric_account_mapping`
+- `gas_account_mapping`
+- `metadata`
+
+### Gas workbook support
+
+The gas importer accepts both the normalized Gas History template and ERAU's existing wide utility workbook layout. The wide parser supports:
+
+- `ACCOUNT CODES - GAS (TECO)` sections
+- `ACCOUNT CODES - GAS SOUTH` sections
+- two-row headers with repeated month `THERMS` / `COST` column pairs
+- zero-therm fixed-charge bills
+- blank or dash usage cells
+- `TOTALS PER MONTH` rows (ignored)
+- account/building metadata resolved through Gas Account mappings
+
+Gas rows are normalized to one row per provider + utility account + billing month before analytics.
+
+### Recommended monthly workflow
+
+1. Run `fpl_gas_energy_duckdb_marimo.py` locally.
+2. Select the current combined FPL workbook and the new monthly FPL workbook.
+3. Point the notebook at the current wide TECO / GAS SOUTH workbook.
+4. Build and download `energy.duckdb`.
+5. Upload `energy.duckdb` in the Streamlit sidebar.
+6. Streamlit reads electric, demand, gas, and both mapping tables directly from the database.
+
+The Streamlit gas Excel uploader remains available as an admin/fallback import path and now also accepts the wide workbook format.

@@ -1207,6 +1207,11 @@ def main():
                 st.sidebar.caption(
                     f"Account mapping: {electric_accounts['account_number'].nunique():,} FPL accounts from DuckDB"
                 )
+            if not duckdb_result.gas_accounts.empty:
+                gas_accounts = duckdb_result.gas_accounts
+                st.sidebar.caption(
+                    f"Gas mapping: {gas_accounts['utility_account'].nunique():,} utility accounts from DuckDB"
+                )
         except Exception as exc:
             st.error(f"Could not open uploaded DuckDB: {exc}")
             duckdb_result = None

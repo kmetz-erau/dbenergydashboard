@@ -18,6 +18,7 @@ class DuckDBLoadResult:
     demand_history: pd.DataFrame
     gas_history: pd.DataFrame
     electric_accounts: pd.DataFrame
+    gas_accounts: pd.DataFrame
     tables: list[str]
     source_name: str
 
@@ -180,6 +181,48 @@ def _normalize_electric_accounts(df: pd.DataFrame) -> pd.DataFrame:
     return out[[c for c in wanted if c in out.columns]].drop_duplicates("account_number", keep="last")
 
 
+
+
+def _normalize_gas_accounts(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    rename = {
+        "utilityAccount": "utility_account",
+        "accountNumber": "utility_account",
+        "account_number": "utility_account",
+        "buildingNumber": "building_id",
+        "building_number": "building_id",
+        "buildingName": "account_name",
+        "building_name": "account_name",
+        "eraAccount": "erau_account",
+        "era_account": "erau_account",
+        "gasMeterID": "gas_meter_id",
+        "rateSchedule": "rate_schedule",
+        "usageGroup": "usage_group",
+        "costComponent": "cost_component",
+        "endUse": "end_use",
+        "usageAuthoritative": "usage_authoritative",
+        "includeInSiteEUI": "include_in_site_eui",
+    }
+    out = df.rename(columns={k: v for k, v in rename.items() if k in df.columns}).copy()
+    if "utility_account" not in out.columns or "building_id" not in out.columns:
+        return pd.DataFrame()
+    out["utility_account"] = out["utility_account"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
+    out["building_id"] = out["building_id"].astype(str).str.strip()
+    out["provider"] = out.get("provider", pd.Series("UNKNOWN", index=out.index)).astype(str).str.strip().str.upper()
+    for col, default in [("active", True), ("usage_authoritative", True), ("include_in_site_eui", True)]:
+        if col not in out.columns:
+            out[col] = default
+        else:
+            out[col] = out[col].astype(str).str.lower().isin({"true", "1", "yes", "y"})
+    wanted = [
+        "provider", "utility_account", "erau_account", "building_id", "account_name",
+        "gas_meter_id", "rate_schedule", "usage_group", "cost_component", "end_use",
+        "usage_authoritative", "include_in_site_eui", "active", "notes",
+    ]
+    return out[[c for c in wanted if c in out.columns]].drop_duplicates(["provider", "utility_account"], keep="last")
+
+
 def load_duckdb_bytes(raw: bytes, source_name: str = "energy.duckdb") -> DuckDBLoadResult:
     """Load dashboard-ready datasets from an uploaded DuckDB file.
 
@@ -187,7 +230,8 @@ def load_duckdb_bytes(raw: bytes, source_name: str = "energy.duckdb") -> DuckDBL
       electric: fpl_bills, electric_history
       demand:   fpl_demand, demand_history
       gas:      gas_history, gas_bills
-      mapping:  electric_account_mapping, electric_accounts
+      electric mapping: electric_account_mapping, electric_accounts
+      gas mapping:      gas_account_mapping, gas_accounts
     """
     try:
         import duckdb  # lazy import keeps normal Excel mode usable if package is absent
@@ -218,6 +262,7 @@ def load_duckdb_bytes(raw: bytes, source_name: str = "energy.duckdb") -> DuckDBL
         demand_table = _pick_table(tables, "fpl_demand", "demand_history")
         gas_table = _pick_table(tables, "gas_history", "gas_bills")
         mapping_table = _pick_table(tables, "electric_account_mapping", "electric_accounts")
+        gas_mapping_table = _pick_table(tables, "gas_account_mapping", "gas_accounts")
 
         electric = pd.DataFrame()
         if electric_table:
@@ -238,6 +283,7 @@ def load_duckdb_bytes(raw: bytes, source_name: str = "energy.duckdb") -> DuckDBL
 
         gas = _normalize_gas(_read_table(con, gas_table)) if gas_table else pd.DataFrame()
         mappings = _normalize_electric_accounts(_read_table(con, mapping_table)) if mapping_table else pd.DataFrame()
+        gas_mappings = _normalize_gas_accounts(_read_table(con, gas_mapping_table)) if gas_mapping_table else pd.DataFrame()
 
         if electric.empty and demand.empty and gas.empty:
             raise ValueError(
@@ -250,6 +296,7 @@ def load_duckdb_bytes(raw: bytes, source_name: str = "energy.duckdb") -> DuckDBL
             demand_history=demand,
             gas_history=gas,
             electric_accounts=mappings,
+            gas_accounts=gas_mappings,
             tables=tables,
             source_name=source_name,
         )

@@ -29,3 +29,20 @@ def test_duckdb_storage_electric_converts_storage_schema():
     assert out.loc[0, "accountNumber"] == "0204486419"
     assert out.loc[0, "fullMeterID"] == "MV32681"
     assert out.loc[0, "kWh"] == 64200
+
+from src.duckdb_loader import _normalize_gas_accounts
+
+
+def test_duckdb_gas_mapping_normalizes_accounts():
+    raw = pd.DataFrame({
+        "provider": ["TECO", "GAS SOUTH"],
+        "utility_account": ["221009610710", "5400595608"],
+        "building_id": ["Building 155", "Building 221"],
+        "usage_authoritative": [True, False],
+        "include_in_site_eui": [True, True],
+        "active": [True, True],
+    })
+    out = _normalize_gas_accounts(raw)
+    assert out["utility_account"].tolist() == ["221009610710", "5400595608"]
+    assert out["provider"].tolist() == ["TECO", "GAS SOUTH"]
+    assert out["usage_authoritative"].tolist() == [True, False]

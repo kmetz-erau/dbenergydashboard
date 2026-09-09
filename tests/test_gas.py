@@ -243,3 +243,24 @@ def test_seed_migration_adds_historical_gas_accounts_without_overwriting_existin
     accounts = load_gas_accounts(engine, include_inactive=True)
     assert ((accounts["provider"] == "TECO") & (accounts["utility_account"] == "211009956130")).any()
     assert ((accounts["provider"] == "GAS SOUTH") & (accounts["utility_account"] == "4933635109")).any()
+
+
+def test_wide_gas_workbook_layout_is_parsed():
+    from src.gas_loader import parse_wide_gas_workbook
+
+    raw = pd.DataFrame([
+        [None, "ACCOUNT CODES - GAS (TECO)", None, None, "JULY", "JULY", "AUG", "AUG"],
+        ["Bldg #", "Name", "Jan 2026 New TECO Acct#", "ERAU Acct#", "THERMS", "COST", "THERMS", "COST"],
+        ["155", "DORM #1, BLDG #155", "221009610710", "22185-7460", "1212.60", "$1,923.17", "1289.20", "$2,033.49"],
+        [None, None, None, "TOTALS PER MONTH", "1212.60", "$1,923.17", "1289.20", "$2,033.49"],
+        [None, "FISCAL YEAR 25/26", None, None, None, None, None, None],
+        [None, "ACCOUNT CODES - GAS SOUTH", None, None, None, None, None, None],
+        [None, "NAME", "June 2026 New Acct#", "ERAU Acct#", None, None, None, None],
+        ["221", "APOLLO HALL", "5400595608", "22185-7460", "369.10", "$267.85", None, None],
+    ])
+
+    out = parse_wide_gas_workbook(raw)
+    assert len(out) == 3
+    assert set(out["Provider"]) == {"TECO", "GAS SOUTH"}
+    assert set(out["Billing Month"].dt.strftime("%Y-%m")) == {"2026-07", "2026-08"}
+    assert out.loc[out["Utility Account"].eq("5400595608"), "Therms"].iloc[0] == pytest.approx(369.1)

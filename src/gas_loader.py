@@ -3,6 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 from typing import BinaryIO, NamedTuple
+import re
 
 import numpy as np
 import pandas as pd
@@ -67,6 +68,199 @@ COLUMN_ALIASES = {
     "end use": "end_use",
     "notes": "notes",
 }
+
+
+
+
+_MONTHS = {
+    "JAN": 1, "JANUARY": 1,
+    "FEB": 2, "FEBRUARY": 2,
+    "MAR": 3, "MARCH": 3,
+    "APR": 4, "APRIL": 4,
+    "MAY": 5,
+    "JUN": 6, "JUNE": 6,
+    "JUL": 7, "JULY": 7,
+    "AUG": 8, "AUGUST": 8,
+    "SEP": 9, "SEPT": 9, "SEPTEMBER": 9,
+    "OCT": 10, "OCTOBER": 10,
+    "NOV": 11, "NOVEMBER": 11,
+    "DEC": 12, "DECEMBER": 12,
+}
+
+
+def _month_number(value: object) -> int | None:
+    text = _clean_header(value).upper()
+    if not text:
+        return None
+    for token, number in _MONTHS.items():
+        if re.search(rf"\b{re.escape(token)}\b", text):
+            return number
+    return None
+
+
+def _numeric_cell(value: object) -> float | None:
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).replace("\xa0", " ").strip()
+    if not text or text in {"-", "—", "–"}:
+        return None
+    text = text.replace("$", "").replace(",", "").strip()
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _year_hint_from_row(row: pd.Series) -> int | None:
+    text = " ".join(str(v) for v in row.tolist() if v is not None and not pd.isna(v))
+    match = re.search(r"\b(?:19|20)(\d{2})\b", text)
+    if match:
+        return int(match.group(0))
+    return None
+
+
+def _fiscal_year_hint(raw: pd.DataFrame, row_idx: int) -> tuple[int, int] | None:
+    for r in range(row_idx, max(-1, row_idx - 12), -1):
+        text = " ".join(str(v) for v in raw.iloc[r].tolist() if v is not None and not pd.isna(v))
+        m = re.search(r"FISCAL\s+YEAR\s*[’']?\s*(\d{2})\s*/\s*(\d{2})", text, re.I)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            return 2000 + a, 2000 + b
+    return None
+
+
+def _resolve_month_year(raw: pd.DataFrame, header_row: int, col_idx: int, section_year: int | None) -> pd.Timestamp | None:
+    month = None
+    # Search upward in the same column; this also lets the Gas South block reuse
+    # JULY/AUG labels printed in the top TECO header of the user's workbook.
+    for r in range(header_row - 1, -1, -1):
+        month = _month_number(raw.iat[r, col_idx])
+        if month:
+            break
+    if not month:
+        return None
+
+    if section_year:
+        year = section_year
+    else:
+        fy = _fiscal_year_hint(raw, header_row)
+        if fy:
+            # Standard fiscal-year interpretation when there is no explicit
+            # account-year hint: Jul-Dec = first year, Jan-Jun = second year.
+            year = fy[0] if month >= 7 else fy[1]
+        else:
+            year = pd.Timestamp.today().year
+    return pd.Timestamp(year=year, month=month, day=1)
+
+
+def parse_wide_gas_workbook(raw: pd.DataFrame) -> pd.DataFrame:
+    """Parse ERAU's wide TECO/GAS SOUTH workbook into normalized monthly rows.
+
+    Expected shape is the user's existing worksheet style: section title,
+    two-row headers, one account per row, and repeated MONTH THERMS / MONTH COST
+    column pairs. TOTALS and fiscal-year separator rows are ignored.
+    """
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+
+    rows: list[dict] = []
+    nrows, ncols = raw.shape
+    section_starts: list[tuple[int, str]] = []
+
+    for r in range(nrows):
+        text = " ".join(str(v) for v in raw.iloc[r].tolist() if v is not None and not pd.isna(v)).upper()
+        if "ACCOUNT CODES - GAS" in text:
+            provider = "GAS SOUTH" if "SOUTH" in text else "TECO"
+            section_starts.append((r, provider))
+
+    for start_idx, provider in section_starts:
+        # Locate the account/header row directly after the section title.
+        header_row = None
+        for r in range(start_idx + 1, min(nrows, start_idx + 8)):
+            vals = [_clean_header(v) for v in raw.iloc[r].tolist()]
+            joined = " | ".join(vals)
+            if ("name" in vals or "name" in joined) and ("acct" in joined or "account" in joined):
+                header_row = r
+                break
+        if header_row is None:
+            continue
+
+        headers = [_clean_header(v) for v in raw.iloc[header_row].tolist()]
+        bldg_col = next((i for i, h in enumerate(headers) if "bldg" in h or h == "building"), 0)
+        name_col = next((i for i, h in enumerate(headers) if h == "name" or "name" in h), 1)
+        account_col = next((i for i, h in enumerate(headers) if "acct" in h and "erau" not in h), 2)
+        erau_col = next((i for i, h in enumerate(headers) if "erau" in h and "acct" in h), 3)
+
+        # The account header itself usually contains an explicit year, e.g.
+        # "Jan 2026 New TECO Acct#" or "June 2026 New Acct#". This is safer
+        # for the user's GAS SOUTH block than relying solely on the fiscal label.
+        section_year = _year_hint_from_row(raw.iloc[header_row])
+
+        measure_cols: list[tuple[int, str, pd.Timestamp]] = []
+        for c in range(ncols):
+            h = headers[c] if c < len(headers) else ""
+            if "therm" not in h and "cost" not in h:
+                # GAS SOUTH in the user's sheet reuses the JULY/AUG columns but
+                # does not repeat THERMS/COST on its local header. Reuse the
+                # closest prior measure label in the same column.
+                for prior in range(header_row - 1, -1, -1):
+                    candidate = _clean_header(raw.iat[prior, c])
+                    if "therm" in candidate or "cost" in candidate:
+                        h = candidate
+                        break
+            if "therm" not in h and "cost" not in h:
+                continue
+            month = _resolve_month_year(raw, header_row, c, section_year)
+            if month is None:
+                continue
+            measure = "therms" if "therm" in h else "cost"
+            measure_cols.append((c, measure, month))
+
+        if not measure_cols:
+            continue
+
+        month_map: dict[pd.Timestamp, dict[str, int]] = {}
+        for c, measure, month in measure_cols:
+            month_map.setdefault(month, {})[measure] = c
+
+        for r in range(header_row + 1, nrows):
+            text = " ".join(str(v) for v in raw.iloc[r].tolist() if v is not None and not pd.isna(v)).upper()
+            if r > header_row + 1 and ("ACCOUNT CODES - GAS" in text or "FISCAL YEAR" in text):
+                break
+            if "TOTALS PER MONTH" in text:
+                break
+
+            account = _clean_string(raw.iat[r, account_col]) if account_col < ncols else None
+            if not account:
+                continue
+            # Only account-like numeric identifiers are data rows.
+            account_digits = re.sub(r"\D", "", account)
+            if len(account_digits) < 6:
+                continue
+
+            building = _clean_string(raw.iat[r, bldg_col]) if bldg_col < ncols else None
+            name = _clean_string(raw.iat[r, name_col]) if name_col < ncols else None
+            erau = _clean_string(raw.iat[r, erau_col]) if erau_col < ncols else None
+
+            for month, cols in month_map.items():
+                therms = _numeric_cell(raw.iat[r, cols["therms"]]) if "therms" in cols else None
+                cost = _numeric_cell(raw.iat[r, cols["cost"]]) if "cost" in cols else None
+                # A blank pair means the provider did not bill that month; a
+                # zero-therm row with a fixed cost must still be retained.
+                if therms is None and cost is None:
+                    continue
+                rows.append({
+                    "Billing Month": month,
+                    "Provider": provider,
+                    "Utility Account": account_digits,
+                    "ERAU Account": erau,
+                    "Name": name,
+                    "Building": building,
+                    "Therms": 0.0 if therms is None and cost is not None else therms,
+                    "Cost": cost,
+                })
+
+    return pd.DataFrame(rows)
 
 
 class GasLoadResult(NamedTuple):
@@ -333,11 +527,24 @@ def load_gas_file(
     default_month=None,
     gas_accounts: pd.DataFrame | None = None,
 ) -> GasLoadResult:
-    table = _read_table(source, source_name)
-    return GasLoadResult(
-        rows=normalize_gas_upload(table, default_month=default_month, gas_accounts=gas_accounts),
-        source_name=source_name,
-    )
+    raw = source if isinstance(source, bytes) else source.read()
+    try:
+        table = _read_table(raw, source_name)
+        rows = normalize_gas_upload(table, default_month=default_month, gas_accounts=gas_accounts)
+        return GasLoadResult(rows=rows, source_name=source_name)
+    except ValueError as exc:
+        # Fall back to the user's legacy wide workbook layout. CSV files do not
+        # have the multi-row/section structure this parser expects.
+        if Path(source_name).suffix.lower() not in {".xlsx", ".xls"}:
+            raise
+        engine = "xlrd" if Path(source_name).suffix.lower() == ".xls" else "openpyxl"
+        excel = pd.ExcelFile(BytesIO(raw), engine=engine)
+        wide = pd.read_excel(excel, sheet_name=excel.sheet_names[0], header=None, dtype=object)
+        parsed = parse_wide_gas_workbook(wide)
+        if parsed.empty:
+            raise exc
+        rows = normalize_gas_upload(parsed, default_month=default_month, gas_accounts=gas_accounts)
+        return GasLoadResult(rows=rows, source_name=source_name)
 
 
 def gas_template_excel() -> bytes:
