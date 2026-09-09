@@ -60,6 +60,27 @@ meters_table = Table(
 )
 
 
+electric_history_table = Table(
+    "electric_history",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("bill_key", String(300), nullable=False, unique=True),
+    Column("account_number", String(100), nullable=False),
+    Column("account_name", String(300), nullable=True),
+    Column("service_address", String(500), nullable=True),
+    Column("meter_number", String(100), nullable=True),
+    Column("full_meter_id", String(100), nullable=True),
+    Column("date_billed", DateTime, nullable=False),
+    Column("period_start", DateTime, nullable=True),
+    Column("period_end", DateTime, nullable=True),
+    Column("days_used", Float, nullable=True),
+    Column("kwh", Float, nullable=True),
+    Column("new_charges", Float, nullable=True),
+    Column("total_bill_amount", Float, nullable=True),
+    Column("source_file", String(500), nullable=True),
+)
+
+
 demand_history_table = Table(
     "demand_history",
     metadata,
@@ -170,6 +191,11 @@ def _coerce_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _datetime_or_none(value: Any):
+    parsed = pd.to_datetime(value, errors="coerce")
+    return None if pd.isna(parsed) else parsed.to_pydatetime()
 
 
 def _none_if_nan(value: Any) -> Any:
@@ -313,6 +339,86 @@ def update_meter(engine: Engine, row_id: int, values: dict[str, Any]) -> None:
 def delete_meter(engine: Engine, row_id: int) -> None:
     with engine.begin() as conn:
         conn.execute(delete(meters_table).where(meters_table.c.id == row_id))
+
+
+ELECTRIC_APP_COLUMNS = [
+    "accountNumber", "accountName", "serviceAddress", "meterNumber", "fullMeterID",
+    "dateBilled", "periodStart", "periodEnd", "daysUsed", "kWh", "newCharges",
+    "totalBillAmount", "sourceFile",
+]
+
+
+def ensure_electric_history_table(engine: Engine) -> None:
+    electric_history_table.create(engine, checkfirst=True)
+
+
+def upsert_electric_history(engine: Engine, bills: pd.DataFrame, source_file: str | None = None) -> dict[str, int]:
+    """Persist normalized FPL bills using account + meter + bill date as the durable key."""
+    ensure_electric_history_table(engine)
+    if bills is None or bills.empty:
+        return {"inserted": 0, "updated": 0}
+    inserted_count = 0
+    updated_count = 0
+    with engine.begin() as conn:
+        for row in bills.to_dict("records"):
+            account = str(row.get("accountNumber") or "").strip()
+            meter_id = str(row.get("fullMeterID") or "").strip().upper()
+            date_billed = pd.to_datetime(row.get("dateBilled"), errors="coerce")
+            if not account or pd.isna(date_billed):
+                continue
+            bill_key = f"{account}|{date_billed:%Y-%m-%d}"
+            payload = {
+                "bill_key": bill_key,
+                "account_number": account,
+                "account_name": _none_if_nan(row.get("accountName")),
+                "service_address": _none_if_nan(row.get("serviceAddress")),
+                "meter_number": _none_if_nan(row.get("meterNumber")),
+                "full_meter_id": meter_id,
+                "date_billed": date_billed.to_pydatetime(),
+                "period_start": _datetime_or_none(row.get("periodStart")),
+                "period_end": _datetime_or_none(row.get("periodEnd")),
+                "days_used": _none_if_nan(row.get("daysUsed")),
+                "kwh": _none_if_nan(row.get("kWh")),
+                "new_charges": _none_if_nan(row.get("newCharges")),
+                "total_bill_amount": _none_if_nan(row.get("totalBillAmount")),
+                "source_file": source_file,
+            }
+            existing = conn.execute(select(electric_history_table.c.id).where(electric_history_table.c.bill_key == bill_key)).first()
+            if existing is None:
+                conn.execute(insert(electric_history_table).values(**payload))
+                inserted_count += 1
+            else:
+                conn.execute(update(electric_history_table).where(electric_history_table.c.bill_key == bill_key).values(**payload))
+                updated_count += 1
+    return {"inserted": inserted_count, "updated": updated_count}
+
+
+def load_electric_history(engine: Engine) -> pd.DataFrame:
+    ensure_electric_history_table(engine)
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(electric_history_table).order_by(electric_history_table.c.date_billed, electric_history_table.c.account_number)
+        ).mappings().all()
+    if not rows:
+        return pd.DataFrame(columns=ELECTRIC_APP_COLUMNS)
+    df = pd.DataFrame(rows).rename(columns={
+        "account_number": "accountNumber",
+        "account_name": "accountName",
+        "service_address": "serviceAddress",
+        "meter_number": "meterNumber",
+        "full_meter_id": "fullMeterID",
+        "date_billed": "dateBilled",
+        "period_start": "periodStart",
+        "period_end": "periodEnd",
+        "days_used": "daysUsed",
+        "kwh": "kWh",
+        "new_charges": "newCharges",
+        "total_bill_amount": "totalBillAmount",
+        "source_file": "sourceFile",
+    })
+    for col in ["dateBilled", "periodStart", "periodEnd"]:
+        df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df[[c for c in ELECTRIC_APP_COLUMNS if c in df.columns]]
 
 
 DEMAND_APP_COLUMNS = [

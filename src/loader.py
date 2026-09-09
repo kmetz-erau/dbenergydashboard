@@ -96,7 +96,15 @@ def clean_account(value: object) -> str:
     text = str(value).strip()
     if text.endswith(".0") and text[:-2].isdigit():
         text = text[:-2]
-    return text
+    digits = re.sub(r"\D", "", text)
+    if digits and "E" not in text.upper():
+        return digits.zfill(10)
+    try:
+        if "E" in text.upper():
+            return str(int(float(text))).zfill(10)
+    except (ValueError, OverflowError):
+        pass
+    return digits.zfill(10) if digits else text
 
 
 def _read_bytes(source: bytes | BinaryIO) -> bytes:
@@ -156,16 +164,27 @@ def _demand_charge_from_text(text: str) -> tuple[float, float]:
 def load_monthly_workbook(source: bytes | BinaryIO, source_name: str = "uploaded.xlsx") -> WorkbookLoadResult:
     raw = _read_bytes(source)
     excel = pd.ExcelFile(io.BytesIO(raw), engine="openpyxl")
-    if "Bill History" not in excel.sheet_names:
-        raise ValueError("Workbook must contain a 'Bill History' sheet.")
+    if "FPL Bills Combined" in excel.sheet_names:
+        bill_sheet = "FPL Bills Combined"
+    elif "Bill History" in excel.sheet_names:
+        bill_sheet = "Bill History"
+    elif "Selected Enriched" in excel.sheet_names:
+        bill_sheet = "Selected Enriched"
+    else:
+        raise ValueError(
+            "Workbook must contain 'FPL Bills Combined', 'Bill History', or 'Selected Enriched'."
+        )
 
-    bills = pd.read_excel(excel, sheet_name="Bill History")
+    bills = pd.read_excel(excel, sheet_name=bill_sheet)
     missing = sorted(REQUIRED_BILL_COLUMNS - set(bills.columns))
     if missing:
-        raise ValueError(f"Bill History is missing required columns: {', '.join(missing)}")
+        raise ValueError(f"{bill_sheet} is missing required columns: {', '.join(missing)}")
 
     bills = normalize_bill_history(bills)
-    demand = load_demand_details(excel)
+    if bill_sheet in {"FPL Bills Combined", "Selected Enriched"}:
+        demand = normalize_demand_details(pd.read_excel(excel, sheet_name=bill_sheet), source_sheet=bill_sheet)
+    else:
+        demand = load_demand_details(excel)
     return WorkbookLoadResult(
         bills=bills,
         demand=demand,

@@ -16,7 +16,7 @@ from src.auth import require_password, render_logout_button
 from src.exporter import build_analysis_workbook
 from src.gas_analytics import build_combined_site_snapshot, run_gas_analytics
 from src.gas_loader import gas_history_excel, gas_template_excel, load_gas_file
-from src.loader import load_monthly_workbook
+from src.loader import load_monthly_workbook, normalize_bill_history
 from src.reference_io import references_to_excel
 from src.storage import (
     add_building,
@@ -26,6 +26,7 @@ from src.storage import (
     init_database,
     load_buildings,
     load_demand_history,
+    load_electric_history,
     load_meters,
     load_gas_accounts,
     load_gas_history,
@@ -33,6 +34,7 @@ from src.storage import (
     update_meter,
     update_gas_account,
     upsert_demand_history,
+    upsert_electric_history,
     upsert_gas_history,
 )
 
@@ -407,11 +409,22 @@ def render_demand(bundle):
     total_demand_charge = latest["demandChargeAmount"].sum(min_count=1)
     median_intensity = latest["demandIntensityWPerSF"].median()
     estimated_rows = int(latest_allocated["demandChargeIsEstimated"].fillna(False).sum()) if not latest_allocated.empty else 0
+    demand_accounts = demand_history["accountNumber"].nunique() if not demand_history.empty else 0
+    latest_bill_month = demand_history["billMonth"].max() if not demand_history.empty and "billMonth" in demand_history.columns else pd.NaT
+    latest_month_rows = (
+        demand_history[demand_history["billMonth"].eq(latest_bill_month)].copy()
+        if pd.notna(latest_bill_month) and "billMonth" in demand_history.columns
+        else pd.DataFrame()
+    )
+    latest_month_accounts = latest_month_rows["accountNumber"].nunique() if not latest_month_rows.empty else 0
+    latest_month_meters = latest_month_rows["fullMeterID"].nunique() if not latest_month_rows.empty else 0
 
     if pd.notna(latest_data_date):
         st.caption(f"Latest stored demand bill date: {latest_data_date:%B %d, %Y}. Building KPIs use each building's latest available demand bill month.")
     metric_grid([
         ("Buildings w/ Demand", f"{latest['building_id'].nunique():,}", None),
+        ("Latest-Month Demand Accounts", f"{latest_month_accounts:,}", None),
+        ("Latest-Month Demand Meters", f"{latest_month_meters:,}", None),
         ("Sum of Billed Meter Peaks", f"{number(total_peak, 0)} kW", None),
         ("Largest Building Peak", f"{number(largest_peak, 0)} kW", None),
         ("Demand Charges", currency(total_demand_charge), None),
@@ -512,6 +525,35 @@ def render_demand(bundle):
         ]
         show_dataframe(shown[[c for c in cols if c in shown.columns]].sort_values("billedPeakDemandKW", ascending=False), height=420)
 
+        st.subheader("Demand Cost Composition")
+        cost_cols = [
+            "building_id", "facility_name", "fullMeterID", "accountNumber", "dateBilled",
+            "rateSchedule", "billedPeakDemandKW", "onPeakDemandKW", "maximumDemandKW",
+            "demandChargePerKW", "maximumDemandChargePerKW", "demandChargeAmount",
+            "demandChargeIsEstimated",
+        ]
+        show_dataframe(
+            shown[[c for c in cost_cols if c in shown.columns]]
+            .sort_values("demandChargeAmount", ascending=False),
+            height=380,
+        )
+
+        missing_rate = shown[
+            shown["billedPeakDemandKW"].notna()
+            & shown["demandChargePerKW"].isna()
+        ].copy()
+        if not missing_rate.empty:
+            st.warning(
+                f"{len(missing_rate):,} latest demand meter rows have measured kW but no parsed demand $/kW rate. "
+                "Review these bills before using demand-charge totals for budgeting."
+            )
+            review_cols = [
+                "building_id", "facility_name", "fullMeterID", "accountNumber",
+                "dateBilled", "rateSchedule", "billedPeakDemandKW",
+                "demandChargePerKW", "maximumDemandChargePerKW",
+            ]
+            show_dataframe(missing_rate[[c for c in review_cols if c in missing_rate.columns]], height=260)
+
         st.subheader("Rate Schedule Demand Summary")
         rate_summary = (
             shown.groupby("rateSchedule", dropna=False)
@@ -519,6 +561,8 @@ def render_demand(bundle):
                 meters=("fullMeterID", "nunique"),
                 buildings=("building_id", "nunique"),
                 summedBilledPeaksKW=("billedPeakDemandKW", lambda x: x.sum(min_count=1)),
+                avgDemandRatePerKW=("demandChargePerKW", "mean"),
+                avgMaximumRatePerKW=("maximumDemandChargePerKW", "mean"),
                 demandChargeAmount=("demandChargeAmount", lambda x: x.sum(min_count=1)),
             )
             .reset_index()
@@ -1098,7 +1142,7 @@ def main():
     gas_accounts = load_gas_accounts(engine, include_inactive=True)
 
     st.sidebar.title("⚡ ERAU Energy")
-    uploaded = st.sidebar.file_uploader("Upload monthly enhanced FPL workbook", type=["xlsx"], key="fpl_upload")
+    uploaded = st.sidebar.file_uploader("Upload FPL combined history or monthly workbook", type=["xlsx"], key="fpl_upload")
     st.sidebar.divider()
     gas_uploaded = st.sidebar.file_uploader(
         "Upload gas history workbook",
@@ -1152,24 +1196,51 @@ def main():
             raw = uploaded.getvalue()
             result = load_monthly_workbook(raw, uploaded.name)
 
-            # Existing FPL demand persistence behavior is unchanged.
             upload_hash = hashlib.sha256(raw).hexdigest()
+
+            if st.session_state.get("saved_electric_upload_hash") != upload_hash:
+                electric_save = upsert_electric_history(engine, result.bills, uploaded.name)
+                st.session_state["saved_electric_upload_hash"] = upload_hash
+                st.session_state["electric_save_stats"] = electric_save
+
             if not result.demand.empty and st.session_state.get("saved_demand_upload_hash") != upload_hash:
                 demand_save = upsert_demand_history(engine, result.demand, uploaded.name)
                 st.session_state["saved_demand_upload_hash"] = upload_hash
                 st.session_state["demand_save_stats"] = demand_save
 
+            electric_history = load_electric_history(engine)
+            electric_history = normalize_bill_history(electric_history) if not electric_history.empty else result.bills
             demand_history = load_demand_history(engine)
-            bundle = run_analytics(result.bills, buildings, meters, demand_history)
-            st.sidebar.success(f"FPL: loaded {len(result.bills):,} bill rows")
-            st.sidebar.caption(f"{result.bills['accountNumber'].nunique()} accounts · {result.bills['fullMeterID'].replace('', pd.NA).nunique()} meters")
+            bundle = run_analytics(electric_history, buildings, meters, demand_history)
+
+            st.sidebar.success(f"FPL database: {len(electric_history):,} stored bill rows")
+            st.sidebar.caption(
+                f"{electric_history['accountNumber'].nunique()} accounts · "
+                f"{electric_history['fullMeterID'].replace('', pd.NA).nunique()} meters"
+            )
+            if st.session_state.get("electric_save_stats"):
+                es = st.session_state["electric_save_stats"]
+                st.sidebar.caption(
+                    f"Electric sync: {es.get('inserted', 0):,} inserted · "
+                    f"{es.get('updated', 0):,} updated"
+                )
             if not result.demand.empty:
                 st.sidebar.caption(f"{len(result.demand):,} demand records extracted this upload")
         except Exception as exc:
             st.error(f"Could not process workbook: {exc}")
             bundle = None
     else:
-        st.sidebar.info("Upload the latest FPL workbook to populate electricity analytics.")
+        electric_history = load_electric_history(engine)
+        demand_history = load_demand_history(engine)
+        if not electric_history.empty:
+            electric_history = normalize_bill_history(electric_history)
+            bundle = run_analytics(electric_history, buildings, meters, demand_history)
+            st.sidebar.success(f"FPL database: {len(electric_history):,} stored bill rows")
+            st.sidebar.caption(
+                f"Latest stored bill: {electric_history['dateBilled'].max():%B %d, %Y}"
+            )
+        else:
+            st.sidebar.info("Upload FPL_Combined_Bills.xlsx or a monthly FPL workbook to initialize electricity history.")
 
     if page == "Reference Data":
         render_reference_data(engine, buildings, meters, gas_accounts, bundle)
@@ -1198,12 +1269,12 @@ def main():
 
     if bundle is None:
         st.title(APP_TITLE)
-        st.write("Upload the enhanced FPL workbook in the sidebar for electricity analytics. Natural gas can be uploaded independently and remains stored in the dashboard database.")
+        st.write("Upload FPL_Combined_Bills.xlsx or a monthly FPL workbook in the sidebar. Electricity, demand, and natural-gas history are persisted in the dashboard database.")
         st.subheader("Monthly workflow")
         st.markdown(
             "1. Upload the latest enhanced FPL `.xlsx` file.\n"
             "2. Optionally upload the cumulative gas history workbook containing Billing Month, Utility Account, Cost, and Therms.\n"
-            "3. Existing FPL processing continues unchanged: bill history, demand, variance, electric EUI, and meter mapping.\n"
+            "3. FPL uploads are upserted into stored electric and demand history, so the dashboard keeps prior months automatically.\n"
             "4. Gas invoices are stored separately, mapped through Gas Accounts, and de-duplicated by physical usage group.\n"
             "5. Review Natural Gas and Total Site EUI for gas cost, therms, Gas EUI, and combined Site EUI.\n"
             "6. Add new buildings, meters, and gas accounts in Reference Data."

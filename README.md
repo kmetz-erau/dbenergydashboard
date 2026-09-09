@@ -298,3 +298,24 @@ pytest -q
 ```
 
 The test suite covers the existing FPL/electric behavior plus gas loading, gas persistence, TECO/Gas South therm de-duplication, generator EUI exclusion and combined Site EUI math.
+
+## September 2026 FPL combined-history update
+
+The dashboard now accepts any of these FPL workbook layouts:
+
+- `FPL Bills Combined` (preferred cumulative workbook)
+- `Bill History` (legacy enhanced collector)
+- `Selected Enriched` (monthly full-extraction export)
+
+Electric bill history is now persisted in the dashboard database, using `accountNumber + dateBilled` as the upsert key. This means you can initialize the database with `FPL_Combined_Bills.xlsx`, then upload future monthly workbooks without losing prior electric history.
+
+Demand history remains persisted separately and is extracted directly from `FPL Bills Combined` or `Selected Enriched` when those sheets are present.
+
+The Demand page now adds:
+
+- latest-month demand-account and demand-meter counts
+- demand cost composition detail
+- average demand and maximum-demand $/kW by rate schedule
+- a warning/review table when measured demand kW is present but the demand $/kW rate is missing
+
+Account numbers are normalized as 10-digit text where possible to reduce Excel scientific-notation issues.
