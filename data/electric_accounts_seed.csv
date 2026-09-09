@@ -1,0 +1,81 @@
+account_number,building_id,gsf,account_name,allocation_pct,active,notes
+3800425260,Building 101,0,CORSAIR HALL PARKING LOT LIGHTS,1.0,True,Authoritative FPL account-to-building mapping
+8920081067,Building 101,17984,CORSAIR HALL,1.0,True,Authoritative FPL account-to-building mapping
+2489797155,Building 150,4400,"* NORTH TES, CAMPUS, PART 1 Bldg #150",1.0,True,Authoritative FPL account-to-building mapping
+2583088048,Building 150,0,NORTH TES PART 2 CAMPUS BLDG #17-4 CHILL PLT 2,1.0,True,Authoritative FPL account-to-building mapping
+0866970577,Building 150,0,"NORTH TES, PART 3 CAMPUS CHILL PLT 3",1.0,True,Authoritative FPL account-to-building mapping
+9937144179,Building 155,144411,RESIDENCE HALL 1 BUILDING #155,1.0,True,Authoritative FPL account-to-building mapping
+0923485197,Building 201,156309,NEW RESIDENCE HALL -PHASE 2 BLDG #201,1.0,True,Authoritative FPL account-to-building mapping
+7649590390,Building 221,61367,APOLLO HALL BLDG #221,1.0,True,Authoritative FPL account-to-building mapping
+2175708953,Building 241,62325,DOOLITTLE BLDG #241,1.0,True,Authoritative FPL account-to-building mapping
+7479417052,Building 241,0,COMPACTOR BLDG #241,1.0,True,Authoritative FPL account-to-building mapping
+4140510407,Building 255,192000,NEW RES #3,1.0,True,Authoritative FPL account-to-building mapping
+0597947423,Building 259,12743,CENTER FOR AVIATION SAFETY,1.0,True,Authoritative FPL account-to-building mapping
+8281789027,Building 261,33700,NEW FITNESS CENTER BLDG #261,1.0,True,Authoritative FPL account-to-building mapping
+5591473268,Building 261,0,NEW POOL PUMP BLDG #261,1.0,True,Authoritative FPL account-to-building mapping
+6348091296,Building 267,5200,CHAPEL Bldg #267,1.0,True,Authoritative FPL account-to-building mapping
+0204486419,Building 311,26941,SIMULATION CENTER BLDG #311,1.0,True,Authoritative FPL account-to-building mapping
+6817708222,Building 312/320,47950,FLEET MAINT HANGER Bldg #312 & 320,1.0,True,Authoritative FPL account-to-building mapping
+4728351455,Building 321,57090,COLLEGE OF BUSINESS BLDG #321,1.0,True,Authoritative FPL account-to-building mapping
+7272148268,Building 331,20415,MILLER AUD (I.C.) BLDG #331,1.0,True,Authoritative FPL account-to-building mapping
+0698563160,Building 340,48680,AMS LAB BLDG 25,1.0,True,Authoritative FPL account-to-building mapping
+5954141163,Building 341,75313,COLLEGE OF AVIATION Bldg #341,1.0,True,Authoritative FPL account-to-building mapping
+4092027129,Building 417,239172,PARKING GARAGE BLDG 417,1.0,True,Authoritative FPL account-to-building mapping
+0696189380,Building 419,134000,COLLEGE OF ARTS/SCIENCES BLDG #419,1.0,True,Authoritative FPL account-to-building mapping
+3836465256,Building 501,22276,ROTC BUILDING Bldg #501,1.0,True,Authoritative FPL account-to-building mapping
+5080503757,Building 508,0,ALUMNI ANNEX PARKING LOT LIGHTS,1.0,True,Authoritative FPL account-to-building mapping
+5129708953,Building 508,5608,ALUMNI ANNEX,1.0,True,Authoritative FPL account-to-building mapping
+5355652131,Building 509,6043.5,MOD 5 (North),1.0,True,Authoritative FPL account-to-building mapping
+6729115375,Building 509,6043.5,MOD 5 (South),1.0,True,Authoritative FPL account-to-building mapping
+5130706988,Building 510,18214,EAGLE ALUMNI CENTER BLDG#510,1.0,True,Authoritative FPL account-to-building mapping
+4104633310,Building 511,0,CROTTY TENNIS/ICI FOUNTAINS/FIELDS,1.0,True,Authoritative FPL account-to-building mapping
+4553584584,Building 513,,MOD 4 = MOD 513 (TRAILER),1.0,True,Authoritative FPL account-to-building mapping
+2978169312,Building 514/516,1574,TRACK & FIELD (Bldg 514 & 516),1.0,True,Authoritative FPL account-to-building mapping
+1954501183,Building 520,,PEB STORAGE UNIT (storage),1.0,True,Authoritative FPL account-to-building mapping
+9214479546,Building 557,16913,NEX GEN PROJECT,1.0,True,Authoritative FPL account-to-building mapping
+2531584056,Building 600,0,CLYDE MORRIS BRIDGE,1.0,True,Authoritative FPL account-to-building mapping
+1258168226,Building 601,67559,ICI CENTER BLDG #601,1.0,True,Authoritative FPL account-to-building mapping
+2167709944,Building 602,0,WELCOME CENTER PARKING BLDG #602,1.0,True,Authoritative FPL account-to-building mapping
+4001977240,Building 602,42623,WELCOME CENTER BLDG #602,1.0,True,Authoritative FPL account-to-building mapping
+7226508096,Building 605/607,1990,SOCCER FACILITY/CONCESSIONS BLDG 605 & 607,1.0,True,Authoritative FPL account-to-building mapping
+7287874197,Building 610,193104,NEW STUDENT UNION BLDG #610,1.0,True,Authoritative FPL account-to-building mapping
+4737638413,Building 610,0,NEW STUDENT UNION - LIFT STATION,1.0,True,Authoritative FPL account-to-building mapping
+0970126587,Building 618,127706,LEHMAN CENTER BLDG #618,1.0,True,Authoritative FPL account-to-building mapping
+5138663108,Building 631,4500,SOUTH TES Bldg #631 CHILL PLT,1.0,True,Authoritative FPL account-to-building mapping
+5566426028,Building 631,0,SOUTH TES - 2 Bldg #631 CHILL PLT 2,1.0,True,Authoritative FPL account-to-building mapping
+3117707905,Building 641,9996,S BLDG BLDG #641 S BLDG ENGINEERING,1.0,True,Authoritative FPL account-to-building mapping
+3111704957,Building 643,14992,M BLDG BLDG #643 MECHANICAL ENGINEERING,1.0,True,Authoritative FPL account-to-building mapping
+5741531288,Building 915,0,FAC MGMT OUTDOOR LIGHTS,1.0,True,Authoritative FPL account-to-building mapping
+5271977406,Building 917,9008,FAC MGMT OFFICES BLDG #917,1.0,True,Authoritative FPL account-to-building mapping
+9411911481,Building 915,5000,FACILITIES MGMT SHOP,1.0,True,Authoritative FPL account-to-building mapping
+3939215566,Building 919,7551,PRINT SHOP BLDG #919,1.0,True,Authoritative FPL account-to-building mapping
+8170573342,Building 921,10083,ATMF BLDG #921,1.0,True,Authoritative FPL account-to-building mapping
+7332919047,Building 923B,2090,1501 BELLEVUE - 923B MAINTENANCE BUILDING,1.0,True,Authoritative FPL account-to-building mapping
+1966352104,Building 1103,4121,1103 S CLYDE MORRIS - PUMP BUILDING,1.0,True,Authoritative FPL account-to-building mapping
+4916435573,Building 1500,263766,STUDENT VILLAGE,1.0,True,Authoritative FPL account-to-building mapping
+8567492015,Building 1500,0,STUDENT VILLAGE - FIRE PUMP,1.0,True,Authoritative FPL account-to-building mapping
+4092392242,Building 1501,8305,1501 BELLEVUE AVENUE - BLDG #2,1.0,True,Authoritative FPL account-to-building mapping
+4219946003,Building 1511,0,"RESEARCH PARK MICAPLEX (SIGN), BLDG #1511",1.0,True,Authoritative FPL account-to-building mapping
+9412896533,Building 1511,0,MICAPLEX LIFT STATION,1.0,True,Authoritative FPL account-to-building mapping
+6141586534,Building 1511,50975,MICAPLEX RESEARCH LAB,1.0,True,Authoritative FPL account-to-building mapping
+7352160357,Building 1521,17182,MICAPLEX RESEARCH PARK/WIND TUNNEL,1.0,True,Authoritative FPL account-to-building mapping
+0748842101,Building 1525,81547,AVIATION PKWY/CC & HYATT BROWN,1.0,True,Authoritative FPL account-to-building mapping
+8544186441,Building 1527,22411,RESEARCH PKWY CAT HANGAR,1.0,True,Authoritative FPL account-to-building mapping
+9890440572,Building 1529,34527,RESEARCH PKWT CAT II -SCIF,1.0,True,Authoritative FPL account-to-building mapping
+8337634359,Building 1535,18608,MICAPLEX HANGAR #1 Applied Avi. & Eng. Research,1.0,True,Authoritative FPL account-to-building mapping
+9622171164,Building 1575,0,RP BALLFIELD (WEST),1.0,True,Authoritative FPL account-to-building mapping
+3434639237,Building 1575,867,1575 AVIA CTR EAGLE FLIGHT (STORAGE SUITE 421),1.0,True,Authoritative FPL account-to-building mapping
+5016193541,Building 1600,0,1600 AVIA CTR FLIGHT INST SHED/HIGBY RAMP,1.0,True,Authoritative FPL account-to-building mapping
+6536994111,Building 1624,0,RICHARD PETTY BLVD LIGHTS,1.0,True,Authoritative FPL account-to-building mapping
+4140806813,Building 1627,5035,CHANUTE (1627) BLDG #1621,1.0,True,Authoritative FPL account-to-building mapping
+4141804841,Building 1629,5413,CHANUTE (1629 LGHT) BLDG #1621,1.0,True,Authoritative FPL account-to-building mapping
+4135801894,Building 1637,5035,CHANUTE (37/41) BLDG #1621,1.0,True,Authoritative FPL account-to-building mapping
+4127802884,Building 1649,5035,CHANUTE (1649 #53) BLDG #1621,1.0,True,Authoritative FPL account-to-building mapping
+4132807803,Building 1657,5035,CHANUTE (1657 #61) BLDG #1621,1.0,True,Authoritative FPL account-to-building mapping
+4133805830,Building 1665,5035,CHANUTE (1665 #69) BLDG #1621,1.0,True,Authoritative FPL account-to-building mapping
+9711303488,Building 2315,7768,2315 Beville Road (BLDG 2315),1.0,True,Authoritative FPL account-to-building mapping
+8084637308,Building 2339,17456,IT BUILDING 2339 BEVILLE ROAD BLDG 3,1.0,True,Authoritative FPL account-to-building mapping
+9314692360,Building 2359,13949,"ICI BLDG, 2359 BEVILLE ROAD WW",1.0,True,Authoritative FPL account-to-building mapping
+8256715072,Building 2399,18018,"WWHQ4, 2399 BEVILLE ROAD",1.0,True,Authoritative FPL account-to-building mapping
+0621260108,Building 250/260,19830,TOMCAT ANNEX MODS 30-1 & 30-2,1.0,True,Authoritative FPL account-to-building mapping
+3104703974,Building 500/502,3200,HEALTH/DISABILITY SVCS. BLDG #500 & 502,1.0,True,Authoritative FPL account-to-building mapping

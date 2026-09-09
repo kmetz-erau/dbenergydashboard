@@ -161,9 +161,16 @@ def _demand_charge_from_text(text: str) -> tuple[float, float]:
     return float(match.group(1)), float(match.group(2).replace(",", ""))
 
 
+def _excel_engine_for_name(source_name: str) -> str:
+    suffix = str(source_name or "").lower().strip()
+    if suffix.endswith(".xls"):
+        return "xlrd"
+    return "openpyxl"
+
+
 def load_monthly_workbook(source: bytes | BinaryIO, source_name: str = "uploaded.xlsx") -> WorkbookLoadResult:
     raw = _read_bytes(source)
-    excel = pd.ExcelFile(io.BytesIO(raw), engine="openpyxl")
+    excel = pd.ExcelFile(io.BytesIO(raw), engine=_excel_engine_for_name(source_name))
     if "FPL Bills Combined" in excel.sheet_names:
         bill_sheet = "FPL Bills Combined"
     elif "Bill History" in excel.sheet_names:

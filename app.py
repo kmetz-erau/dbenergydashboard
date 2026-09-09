@@ -17,6 +17,7 @@ from src.exporter import build_analysis_workbook
 from src.gas_analytics import build_combined_site_snapshot, run_gas_analytics
 from src.gas_loader import gas_history_excel, gas_template_excel, load_gas_file
 from src.loader import load_monthly_workbook, normalize_bill_history
+from src.electric_accounts import load_electric_accounts
 from src.reference_io import references_to_excel
 from src.storage import (
     add_building,
@@ -234,7 +235,7 @@ def render_overview(bundle):
             )
 
     if campus.empty:
-        st.info("No mapped building data is available yet. Review meter mappings in Data Quality / Reference Data.")
+        st.info("No mapped building data is available yet. Review FPL account mappings and meter mappings in Reference Data.")
         return
 
     c1, c2 = st.columns(2)
@@ -1025,13 +1026,13 @@ def render_gas_data_quality(gas_bundle):
 
 def render_reference_data(engine, buildings, meters, gas_accounts, bundle=None):
     st.title("Reference Data")
-    st.write("Add buildings, electric/gas meters, and gas provider accounts here. Existing FPL mapping behavior is unchanged.")
+    st.write("Electric bills map to buildings by meter ID when available, with the authoritative FPL account-number crosswalk as a fallback. Gas accounts remain separately managed below.")
 
     persistence = secret_or_env("DATABASE_URL")
     if not persistence:
         st.warning("This deployment is using the local SQLite database. Hosted Streamlit deployments should set DATABASE_URL to hosted Postgres so edits and gas history survive redeploys/restarts.")
 
-    ref_bytes = references_to_excel(buildings, meters, gas_accounts)
+    ref_bytes = references_to_excel(buildings, meters, gas_accounts, load_electric_accounts())
     st.download_button("Download reference tables", data=ref_bytes, file_name="erau_energy_reference_tables.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     st.download_button("Download blank gas history template", data=gas_template_excel(), file_name="erau_gas_history_template.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
@@ -1039,6 +1040,8 @@ def render_reference_data(engine, buildings, meters, gas_accounts, bundle=None):
     show_dataframe(buildings, height=320)
     st.subheader("Current Meter Mappings")
     show_dataframe(meters, height=320)
+    st.subheader("Authoritative FPL Account Mappings")
+    show_dataframe(load_electric_accounts(), height=420)
     st.subheader("Current Gas Accounts")
     show_dataframe(gas_accounts, height=320)
 
@@ -1140,9 +1143,18 @@ def main():
     buildings = load_buildings(engine, include_inactive=True)
     meters = load_meters(engine, include_inactive=True)
     gas_accounts = load_gas_accounts(engine, include_inactive=True)
+    electric_accounts = load_electric_accounts()
 
     st.sidebar.title("⚡ ERAU Energy")
-    uploaded = st.sidebar.file_uploader("Upload FPL combined history or monthly workbook", type=["xlsx"], key="fpl_upload")
+    uploaded = st.sidebar.file_uploader(
+        "Upload monthly FPL bill file",
+        type=["xls", "xlsx"],
+        key="fpl_upload",
+        help=(
+            "Upload either the master FPL_Combined_Bills workbook or just the newest monthly FPL XLS/XLSX. "
+            "The app automatically appends/upserts electric and demand history in the dashboard database."
+        ),
+    )
     st.sidebar.divider()
     gas_uploaded = st.sidebar.file_uploader(
         "Upload gas history workbook",
@@ -1211,7 +1223,7 @@ def main():
             electric_history = load_electric_history(engine)
             electric_history = normalize_bill_history(electric_history) if not electric_history.empty else result.bills
             demand_history = load_demand_history(engine)
-            bundle = run_analytics(electric_history, buildings, meters, demand_history)
+            bundle = run_analytics(electric_history, buildings, meters, demand_history, electric_accounts)
 
             st.sidebar.success(f"FPL database: {len(electric_history):,} stored bill rows")
             st.sidebar.caption(
@@ -1234,13 +1246,13 @@ def main():
         demand_history = load_demand_history(engine)
         if not electric_history.empty:
             electric_history = normalize_bill_history(electric_history)
-            bundle = run_analytics(electric_history, buildings, meters, demand_history)
+            bundle = run_analytics(electric_history, buildings, meters, demand_history, electric_accounts)
             st.sidebar.success(f"FPL database: {len(electric_history):,} stored bill rows")
             st.sidebar.caption(
                 f"Latest stored bill: {electric_history['dateBilled'].max():%B %d, %Y}"
             )
         else:
-            st.sidebar.info("Upload FPL_Combined_Bills.xlsx or a monthly FPL workbook to initialize electricity history.")
+            st.sidebar.info("Upload the master FPL workbook once, then upload only each new monthly FPL XLS/XLSX. The app appends it to stored history automatically.")
 
     if page == "Reference Data":
         render_reference_data(engine, buildings, meters, gas_accounts, bundle)
@@ -1259,7 +1271,7 @@ def main():
             render_data_quality(bundle)
         else:
             st.title("Data Quality")
-            st.info("Upload the FPL workbook to see electricity data-quality checks.")
+            st.info("Upload an FPL XLS/XLSX in the sidebar to add it to stored electricity history and run data-quality checks.")
         render_gas_data_quality(gas_bundle)
         return
 
@@ -1269,12 +1281,12 @@ def main():
 
     if bundle is None:
         st.title(APP_TITLE)
-        st.write("Upload FPL_Combined_Bills.xlsx or a monthly FPL workbook in the sidebar. Electricity, demand, and natural-gas history are persisted in the dashboard database.")
+        st.write("Upload the FPL master workbook once, then upload only the newest monthly XLS/XLSX in the sidebar. The Streamlit app appends/upserts electricity and demand history directly into the dashboard database.")
         st.subheader("Monthly workflow")
         st.markdown(
-            "1. Upload the latest enhanced FPL `.xlsx` file.\n"
+            "1. Upload the newest FPL `.xls` or `.xlsx` file directly in the Streamlit sidebar.\n"
             "2. Optionally upload the cumulative gas history workbook containing Billing Month, Utility Account, Cost, and Therms.\n"
-            "3. FPL uploads are upserted into stored electric and demand history, so the dashboard keeps prior months automatically.\n"
+            "3. The Streamlit app automatically upserts the new FPL month into stored electric and demand history; no Marimo append step is required.\n"
             "4. Gas invoices are stored separately, mapped through Gas Accounts, and de-duplicated by physical usage group.\n"
             "5. Review Natural Gas and Total Site EUI for gas cost, therms, Gas EUI, and combined Site EUI.\n"
             "6. Add new buildings, meters, and gas accounts in Reference Data."

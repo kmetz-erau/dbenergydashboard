@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from .loader import normalize_meter_id
+from .electric_accounts import normalize_account_number
 
 KBTU_PER_KWH = 3.412
 
@@ -34,12 +35,12 @@ def prepare_references(buildings: pd.DataFrame, meters: pd.DataFrame) -> tuple[p
     b = buildings.copy()
     m = meters.copy()
     if not b.empty:
-        b["building_id"] = b["building_id"].astype(str).str.strip()
+        b["building_id"] = b["building_id"].astype(str).str.strip().str.replace(r"^Building(?=\d)", "Building ", regex=True)
         b["area_sqft"] = pd.to_numeric(b["area_sqft"], errors="coerce")
         if "active" in b.columns:
             b = b[b["active"].fillna(True).astype(bool)].copy()
     if not m.empty:
-        m["building_id"] = m["building_id"].astype(str).str.strip()
+        m["building_id"] = m["building_id"].astype(str).str.strip().str.replace(r"^Building(?=\d)", "Building ", regex=True)
         m["meter_id"] = m["meter_id"].map(normalize_meter_id)
         m["allocation_pct"] = pd.to_numeric(m["allocation_pct"], errors="coerce")
         if "active" in m.columns:
@@ -82,42 +83,66 @@ def allocate_bills_to_buildings(
     bills: pd.DataFrame,
     buildings: pd.DataFrame,
     meters: pd.DataFrame,
+    electric_accounts: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     b, m = prepare_references(buildings, meters)
     resolved, shared_issues = _resolved_electric_meter_map(m)
 
-    allocated = bills.merge(
+    source = bills.copy().reset_index(drop=True)
+    source["_bill_row_id"] = np.arange(len(source))
+    source["accountNumber"] = source["accountNumber"].map(normalize_account_number)
+
+    meter_allocated = source.merge(
         resolved[["meter_id", "building_id", "rate_schedule", "allocation_pct", "status"]],
-        how="inner",
-        left_on="fullMeterID",
-        right_on="meter_id",
+        how="inner", left_on="fullMeterID", right_on="meter_id",
     )
+    meter_allocated["mappingMethod"] = "meter"
+    mapped_row_ids = set(meter_allocated["_bill_row_id"].tolist())
+
+    account_allocated = pd.DataFrame()
+    account_map = electric_accounts.copy() if electric_accounts is not None else pd.DataFrame()
+    if not account_map.empty:
+        account_map["account_number"] = account_map["account_number"].map(normalize_account_number)
+        account_map["building_id"] = account_map["building_id"].astype(str).str.strip()
+        account_map["allocation_pct"] = pd.to_numeric(account_map.get("allocation_pct", 1.0), errors="coerce").fillna(1.0)
+        remaining = source[~source["_bill_row_id"].isin(mapped_row_ids)].copy()
+        account_allocated = remaining.merge(
+            account_map[["account_number", "building_id", "allocation_pct"]],
+            how="inner", left_on="accountNumber", right_on="account_number",
+        )
+        account_allocated["rate_schedule"] = account_allocated.get("rate", "")
+        account_allocated["status"] = "Account mapped"
+        account_allocated["meter_id"] = account_allocated["fullMeterID"]
+        account_allocated["mappingMethod"] = "account"
+
+    allocated = pd.concat([meter_allocated, account_allocated], ignore_index=True, sort=False)
     allocated = allocated.merge(
         b[["building_id", "property_id", "campus", "facility_name", "use_type", "area_sqft", "eui_category"]],
-        how="left",
-        on="building_id",
+        how="left", on="building_id",
     )
+
+    # If the building reference is missing/zero, use authoritative GSF from the account map.
+    if not account_map.empty:
+        gsf = account_map.groupby("building_id", as_index=False).agg(
+            accountMappedGSF=("gsf", lambda s: s.sum(min_count=1)),
+            mappedFacilityName=("account_name", lambda s: next((str(v).strip() for v in s if str(v).strip()), None)),
+        )
+        allocated = allocated.merge(gsf, how="left", on="building_id")
+        allocated["area_sqft"] = allocated["accountMappedGSF"].where(allocated["accountMappedGSF"].gt(0), allocated["area_sqft"])
+        allocated["facility_name"] = allocated["facility_name"].fillna(allocated["mappedFacilityName"])
 
     allocated["allocatedKWh"] = allocated["kWh"] * allocated["allocation_pct"]
     allocated["allocatedCost"] = allocated["totalBillAmount"] * allocated["allocation_pct"]
     allocated["allocatedNewCharges"] = allocated.get("newCharges", np.nan) * allocated["allocation_pct"]
 
-    known_ids = set(resolved["meter_id"].dropna()) | set(shared_issues["meter_id"].dropna())
-    used = bills[bills["fullMeterID"].ne("")].copy()
-    unmapped = used[~used["fullMeterID"].isin(known_ids)].copy()
-    if not unmapped.empty:
-        unmapped = (
-            unmapped.groupby(["fullMeterID", "accountNumber", "accountName", "serviceAddress"], dropna=False)
-            .agg(
-                firstSeen=("dateBilled", "min"),
-                lastSeen=("dateBilled", "max"),
-                billCount=("dateBilled", "count"),
-                totalKWh=("kWh", "sum"),
-            )
-            .reset_index()
-            .sort_values(["lastSeen", "fullMeterID"], ascending=[False, True])
-        )
-
+    mapped_ids = set(allocated["_bill_row_id"].tolist())
+    unmapped_rows = source[~source["_bill_row_id"].isin(mapped_ids)].copy()
+    if not unmapped_rows.empty:
+        unmapped = (unmapped_rows.groupby(["fullMeterID", "accountNumber", "accountName", "serviceAddress"], dropna=False)
+            .agg(firstSeen=("dateBilled","min"), lastSeen=("dateBilled","max"), billCount=("dateBilled","count"), totalKWh=("kWh","sum"))
+            .reset_index().sort_values(["lastSeen","fullMeterID"], ascending=[False,True]))
+    else:
+        unmapped = pd.DataFrame()
     return allocated, unmapped, shared_issues
 
 
@@ -305,63 +330,69 @@ def allocate_demand_to_buildings(
     demand: pd.DataFrame,
     buildings: pd.DataFrame,
     meters: pd.DataFrame,
+    electric_accounts: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Map billed demand records to buildings using the same meter crosswalk as energy."""
     if demand is None or demand.empty:
         return pd.DataFrame(), pd.DataFrame()
 
     b, m = prepare_references(buildings, meters)
     resolved, shared_issues = _resolved_electric_meter_map(m)
-    if resolved.empty:
-        return pd.DataFrame(), demand.copy()
-
-    d = demand.copy()
+    d = demand.copy().reset_index(drop=True)
+    d["_demand_row_id"] = np.arange(len(d))
     d["fullMeterID"] = d["fullMeterID"].map(normalize_meter_id)
+    d["accountNumber"] = d["accountNumber"].map(normalize_account_number)
     d["dateBilled"] = pd.to_datetime(d["dateBilled"], errors="coerce")
     d["billMonth"] = d["dateBilled"].dt.to_period("M").dt.to_timestamp()
 
     ref_cols = ["meter_id", "building_id", "rate_schedule", "allocation_pct", "status"]
-    allocated = d.merge(
-        resolved[ref_cols],
-        how="inner",
-        left_on="fullMeterID",
-        right_on="meter_id",
-    )
-    allocated = allocated.rename(columns={"rate_schedule": "referenceRateSchedule"})
+    meter_allocated = d.merge(resolved[ref_cols], how="inner", left_on="fullMeterID", right_on="meter_id")
+    meter_allocated["mappingMethod"] = "meter"
+    mapped_ids = set(meter_allocated["_demand_row_id"].tolist())
+
+    account_allocated = pd.DataFrame()
+    account_map = electric_accounts.copy() if electric_accounts is not None else pd.DataFrame()
+    if not account_map.empty:
+        account_map["account_number"] = account_map["account_number"].map(normalize_account_number)
+        account_map["building_id"] = account_map["building_id"].astype(str).str.strip()
+        account_map["allocation_pct"] = pd.to_numeric(account_map.get("allocation_pct", 1.0), errors="coerce").fillna(1.0)
+        remaining = d[~d["_demand_row_id"].isin(mapped_ids)].copy()
+        account_allocated = remaining.merge(account_map[["account_number","building_id","allocation_pct"]], how="inner", left_on="accountNumber", right_on="account_number")
+        account_allocated["meter_id"] = account_allocated["fullMeterID"]
+        account_allocated["rate_schedule"] = account_allocated.get("rateScheduleBill", "")
+        account_allocated["status"] = "Account mapped"
+        account_allocated["mappingMethod"] = "account"
+
+    allocated = pd.concat([meter_allocated, account_allocated], ignore_index=True, sort=False)
+    if allocated.empty:
+        return pd.DataFrame(), d.copy()
+    allocated = allocated.rename(columns={"rate_schedule":"referenceRateSchedule"})
     allocated = allocated.merge(
         b[["building_id", "property_id", "campus", "facility_name", "use_type", "area_sqft", "eui_category"]],
-        how="left",
-        on="building_id",
+        how="left", on="building_id",
     )
+    if not account_map.empty:
+        gsf = account_map.groupby("building_id", as_index=False).agg(
+            accountMappedGSF=("gsf", lambda s: s.sum(min_count=1)),
+            mappedFacilityName=("account_name", lambda s: next((str(v).strip() for v in s if str(v).strip()), None)),
+        )
+        allocated = allocated.merge(gsf, how="left", on="building_id")
+        allocated["area_sqft"] = allocated["accountMappedGSF"].where(allocated["accountMappedGSF"].gt(0), allocated["area_sqft"])
+        allocated["facility_name"] = allocated["facility_name"].fillna(allocated["mappedFacilityName"])
 
-    demand_fields = [
-        "genericDemandKW",
-        "onPeakDemandKW",
-        "maximumDemandKW",
-        "billedPeakDemandKW",
-        "demandChargeAmount",
-    ]
-    for field in demand_fields:
+    for field in ["genericDemandKW","onPeakDemandKW","maximumDemandKW","billedPeakDemandKW","demandChargeAmount"]:
         if field not in allocated.columns:
             allocated[field] = np.nan
         allocated[field] = pd.to_numeric(allocated[field], errors="coerce")
         allocated[f"allocated{field[0].upper()}{field[1:]}"] = allocated[field] * allocated["allocation_pct"]
 
-    known_ids = set(resolved["meter_id"].dropna()) | set(shared_issues["meter_id"].dropna())
-    used = d[d["fullMeterID"].ne("")].copy()
-    unmapped = used[~used["fullMeterID"].isin(known_ids)].copy()
-    if not unmapped.empty:
-        unmapped = (
-            unmapped.groupby(["fullMeterID", "accountNumber", "accountName", "serviceAddress"], dropna=False)
-            .agg(
-                firstSeen=("dateBilled", "min"),
-                lastSeen=("dateBilled", "max"),
-                demandRecordCount=("dateBilled", "count"),
-                latestPeakKW=("billedPeakDemandKW", "last"),
-            )
-            .reset_index()
-            .sort_values(["lastSeen", "fullMeterID"], ascending=[False, True])
-        )
+    all_mapped = set(allocated["_demand_row_id"].tolist())
+    used = d[~d["_demand_row_id"].isin(all_mapped)].copy()
+    if not used.empty:
+        unmapped = (used.groupby(["fullMeterID","accountNumber","accountName","serviceAddress"], dropna=False)
+            .agg(firstSeen=("dateBilled","min"), lastSeen=("dateBilled","max"), demandRecordCount=("dateBilled","count"), latestPeakKW=("billedPeakDemandKW","last"))
+            .reset_index().sort_values(["lastSeen","fullMeterID"], ascending=[False,True]))
+    else:
+        unmapped = pd.DataFrame()
     return allocated, unmapped
 
 
@@ -449,9 +480,10 @@ def run_analytics(
     buildings: pd.DataFrame,
     meters: pd.DataFrame,
     demand: pd.DataFrame | None = None,
+    electric_accounts: pd.DataFrame | None = None,
 ) -> AnalyticsBundle:
     b, m = prepare_references(buildings, meters)
-    allocated, unmapped, shared = allocate_bills_to_buildings(bills, b, m)
+    allocated, unmapped, shared = allocate_bills_to_buildings(bills, b, m, electric_accounts)
     monthly = build_building_monthly(allocated)
     snapshot = build_snapshot(monthly)
     campus = build_campus_monthly(monthly)
@@ -461,7 +493,7 @@ def run_analytics(
     duplicates = bills[bills.duplicated(subset=dup_subset, keep=False)].copy() if dup_subset else pd.DataFrame()
 
     demand_details = demand.copy() if demand is not None else pd.DataFrame()
-    allocated_demand, unmapped_demand = allocate_demand_to_buildings(demand_details, b, m)
+    allocated_demand, unmapped_demand = allocate_demand_to_buildings(demand_details, b, m, electric_accounts)
     demand_monthly = build_building_demand_monthly(allocated_demand)
     demand_snapshot = build_demand_snapshot(demand_monthly)
 

@@ -1,3 +1,8 @@
+
+## Monthly FPL upload workflow
+
+The Streamlit app now owns the monthly append process. Upload the master FPL workbook once to initialize history. After that, upload only the newest monthly `.xls` or `.xlsx` file in the Streamlit sidebar. The app normalizes it, upserts electric bills by `accountNumber + dateBilled`, extracts/upserts demand history, and immediately reruns the dashboard against all stored history. No Marimo append step is required.
+
 # ERAU Energy Dashboard
 
 A password-protected Streamlit dashboard for ERAU Daytona Beach utility analytics.
@@ -319,3 +324,12 @@ The Demand page now adds:
 - a warning/review table when measured demand kW is present but the demand $/kW rate is missing
 
 Account numbers are normalized as 10-digit text where possible to reduce Excel scientific-notation issues.
+
+## FPL account-to-building mapping
+
+Electricity analytics now use two mapping paths:
+
+1. Meter ID mapping when a current meter reference exists.
+2. FPL account-number mapping from `data/electric_accounts_seed.csv` as the authoritative fallback.
+
+This prevents building analytics from disappearing when meter identifiers change or are not yet registered. The account mapping also carries the supplied GSF values used for EUI where available.
