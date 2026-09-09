@@ -17,6 +17,7 @@ from src.exporter import build_analysis_workbook
 from src.gas_analytics import build_combined_site_snapshot, run_gas_analytics
 from src.gas_loader import gas_history_excel, gas_template_excel, load_gas_file
 from src.loader import load_monthly_workbook, normalize_bill_history
+from src.duckdb_loader import load_duckdb_bytes
 from src.electric_accounts import load_electric_accounts
 from src.reference_io import references_to_excel
 from src.storage import (
@@ -155,6 +156,12 @@ def database_engine(database_url: str | None):
     # Cache only the connection pool/Engine. Schema checks are intentionally
     # performed on every Streamlit script run so Git hot-reloads can add tables.
     return get_engine(database_url)
+
+
+@st.cache_data(show_spinner=False)
+def load_uploaded_duckdb(raw: bytes, source_name: str):
+    """Cache parsing of an uploaded DuckDB file by its byte content."""
+    return load_duckdb_bytes(raw, source_name)
 
 
 def currency(value: float | None) -> str:
@@ -1146,15 +1153,27 @@ def main():
     electric_accounts = load_electric_accounts()
 
     st.sidebar.title("⚡ ERAU Energy")
-    uploaded = st.sidebar.file_uploader(
-        "Upload monthly FPL bill file",
-        type=["xls", "xlsx"],
-        key="fpl_upload",
+    duckdb_uploaded = st.sidebar.file_uploader(
+        "Upload Energy DuckDB",
+        type=["duckdb", "db"],
+        key="duckdb_upload",
         help=(
-            "Upload either the master FPL_Combined_Bills workbook or just the newest monthly FPL XLS/XLSX. "
-            "The app automatically appends/upserts electric and demand history in the dashboard database."
+            "Primary data-source option. Upload an energy.duckdb containing fpl_bills/electric_history, "
+            "fpl_demand/demand_history, gas_history, and optionally electric_account_mapping. "
+            "The dashboard queries the uploaded database directly for this session."
         ),
     )
+    st.sidebar.caption("Preferred: one DuckDB file containing the current energy history.")
+    with st.sidebar.expander("Excel import fallback", expanded=False):
+        uploaded = st.file_uploader(
+            "Upload monthly FPL bill file",
+            type=["xls", "xlsx"],
+            key="fpl_upload",
+            help=(
+                "Optional fallback/admin import. Upload either the master FPL_Combined_Bills workbook "
+                "or just the newest monthly FPL XLS/XLSX."
+            ),
+        )
     st.sidebar.divider()
     gas_uploaded = st.sidebar.file_uploader(
         "Upload gas history workbook",
@@ -1172,8 +1191,29 @@ def main():
     )
     render_logout_button()
 
-    # Gas is a parallel additive stream and is persisted independently of FPL.
-    if gas_uploaded is not None:
+    # DuckDB is the primary session data source when supplied. Excel/database
+    # persistence remains available as an admin/fallback workflow.
+    duckdb_result = None
+    if duckdb_uploaded is not None:
+        try:
+            db_raw = duckdb_uploaded.getvalue()
+            duckdb_result = load_uploaded_duckdb(db_raw, duckdb_uploaded.name)
+            st.sidebar.success(f"DuckDB loaded: {len(duckdb_result.tables)} tables")
+            st.sidebar.caption(", ".join(duckdb_result.tables[:8]))
+            if len(duckdb_result.tables) > 8:
+                st.sidebar.caption(f"+ {len(duckdb_result.tables) - 8} more tables")
+            if not duckdb_result.electric_accounts.empty:
+                electric_accounts = duckdb_result.electric_accounts
+                st.sidebar.caption(
+                    f"Account mapping: {electric_accounts['account_number'].nunique():,} FPL accounts from DuckDB"
+                )
+        except Exception as exc:
+            st.error(f"Could not open uploaded DuckDB: {exc}")
+            duckdb_result = None
+
+    # Gas is persisted independently when imported from Excel, but an uploaded
+    # DuckDB gas_history table takes precedence for the current session.
+    if gas_uploaded is not None and duckdb_result is None:
         try:
             gas_raw = gas_uploaded.getvalue()
             gas_result = load_gas_file(
@@ -1192,18 +1232,42 @@ def main():
             if pd.notna(month_min) and pd.notna(month_max):
                 st.sidebar.caption(f"{month_min:%b %Y} through {month_max:%b %Y}")
             if st.session_state.get("gas_save_stats"):
-                s = st.session_state["gas_save_stats"]
-                st.sidebar.caption(f"Database sync: {s.get('inserted', 0):,} inserted · {s.get('updated', 0):,} updated")
+                gs = st.session_state["gas_save_stats"]
+                st.sidebar.caption(
+                    f"Database sync: {gs.get('inserted', 0):,} inserted · {gs.get('updated', 0):,} updated"
+                )
         except Exception as exc:
             st.error(f"Could not process gas upload: {exc}")
 
-    gas_history = load_gas_history(engine)
+    if duckdb_result is not None and not duckdb_result.gas_history.empty:
+        gas_history = duckdb_result.gas_history
+        st.sidebar.caption(f"Gas from DuckDB: {len(gas_history):,} rows")
+    else:
+        gas_history = load_gas_history(engine)
+
     gas_bundle = run_gas_analytics(gas_history, gas_accounts, buildings) if not gas_history.empty else None
-    if gas_bundle is not None:
-        st.sidebar.caption(f"Gas history: {len(gas_history):,} stored rows · {gas_history['utility_account'].nunique()} accounts")
+    if gas_bundle is not None and duckdb_result is None:
+        st.sidebar.caption(
+            f"Gas history: {len(gas_history):,} stored rows · {gas_history['utility_account'].nunique()} accounts"
+        )
 
     bundle = None
-    if uploaded is not None:
+    if duckdb_result is not None:
+        electric_history = duckdb_result.electric_history
+        demand_history = duckdb_result.demand_history
+        if not electric_history.empty:
+            electric_history = normalize_bill_history(electric_history)
+            bundle = run_analytics(electric_history, buildings, meters, demand_history, electric_accounts)
+            st.sidebar.success(f"FPL from DuckDB: {len(electric_history):,} bill rows")
+            st.sidebar.caption(
+                f"{electric_history['accountNumber'].nunique()} accounts · "
+                f"latest {electric_history['dateBilled'].max():%B %d, %Y}"
+            )
+            if demand_history is not None and not demand_history.empty:
+                st.sidebar.caption(f"Demand from DuckDB: {len(demand_history):,} rows")
+        else:
+            st.sidebar.warning("Uploaded DuckDB has no supported FPL bill table.")
+    elif uploaded is not None:
         try:
             raw = uploaded.getvalue()
             result = load_monthly_workbook(raw, uploaded.name)
@@ -1252,7 +1316,7 @@ def main():
                 f"Latest stored bill: {electric_history['dateBilled'].max():%B %d, %Y}"
             )
         else:
-            st.sidebar.info("Upload the master FPL workbook once, then upload only each new monthly FPL XLS/XLSX. The app appends it to stored history automatically.")
+            st.sidebar.info("Upload energy.duckdb, or use the Excel import fallback to seed stored history.")
 
     if page == "Reference Data":
         render_reference_data(engine, buildings, meters, gas_accounts, bundle)
@@ -1271,7 +1335,7 @@ def main():
             render_data_quality(bundle)
         else:
             st.title("Data Quality")
-            st.info("Upload an FPL XLS/XLSX in the sidebar to add it to stored electricity history and run data-quality checks.")
+            st.info("Upload energy.duckdb in the sidebar, or use the Excel fallback import, to run data-quality checks.")
         render_gas_data_quality(gas_bundle)
         return
 
@@ -1281,15 +1345,15 @@ def main():
 
     if bundle is None:
         st.title(APP_TITLE)
-        st.write("Upload the FPL master workbook once, then upload only the newest monthly XLS/XLSX in the sidebar. The Streamlit app appends/upserts electricity and demand history directly into the dashboard database.")
+        st.write("Upload your current energy.duckdb in the sidebar for the cleanest workflow. The dashboard reads FPL, demand, gas, and account mappings directly from that database. Excel remains available as a fallback import path.")
         st.subheader("Monthly workflow")
         st.markdown(
-            "1. Upload the newest FPL `.xls` or `.xlsx` file directly in the Streamlit sidebar.\n"
-            "2. Optionally upload the cumulative gas history workbook containing Billing Month, Utility Account, Cost, and Therms.\n"
-            "3. The Streamlit app automatically upserts the new FPL month into stored electric and demand history; no Marimo append step is required.\n"
-            "4. Gas invoices are stored separately, mapped through Gas Accounts, and de-duplicated by physical usage group.\n"
+            "1. Upload `energy.duckdb` in the Streamlit sidebar.\n"
+            "2. The app reads FPL bill history, demand history, gas history, and FPL account mappings directly from supported DuckDB tables.\n"
+            "3. Update the DuckDB locally each month, then replace the uploaded database with the current file.\n"
+            "4. Use the Excel import fallback only when you need to seed or repair the dashboard's built-in storage.\n"
             "5. Review Natural Gas and Total Site EUI for gas cost, therms, Gas EUI, and combined Site EUI.\n"
-            "6. Add new buildings, meters, and gas accounts in Reference Data."
+            "6. Add new buildings, meters, and gas accounts in Reference Data when needed."
         )
         st.download_button(
             "Download blank gas history template",

@@ -333,3 +333,25 @@ Electricity analytics now use two mapping paths:
 2. FPL account-number mapping from `data/electric_accounts_seed.csv` as the authoritative fallback.
 
 This prevents building analytics from disappearing when meter identifiers change or are not yet registered. The account mapping also carries the supplied GSF values used for EUI where available.
+
+## Preferred data source: uploaded DuckDB
+
+The Streamlit sidebar now supports an **Energy DuckDB** upload (`.duckdb` or `.db`) as the primary session data source. This avoids reparsing the cumulative Excel workbook every time.
+
+Supported table names are case-insensitive:
+
+- Electric bills: `fpl_bills` or `electric_history`
+- Demand history: `fpl_demand` or `demand_history`
+- Natural gas: `gas_history` or `gas_bills`
+- FPL account mapping: `electric_account_mapping` or `electric_accounts`
+
+When `electric_account_mapping` is present, it takes precedence over the repository CSV mapping for the current session. The mapping should include an FPL account column and building ID; the loader recognizes common variants such as `account_number`, `accountNumber`, `fpl_account`, `building_id`, `buildingNumber`, and `gsf`.
+
+### Monthly workflow
+
+1. Update `energy.duckdb` locally with the newest FPL/gas data.
+2. Open the Streamlit dashboard.
+3. Upload the current `energy.duckdb` in the sidebar.
+4. The dashboard reads the database directly for that session.
+
+The Excel FPL importer remains available under **Excel import fallback** for seeding or repairing the dashboard's built-in storage.

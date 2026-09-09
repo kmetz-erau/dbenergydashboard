@@ -327,10 +327,15 @@ def normalize_bill_history(df: pd.DataFrame) -> pd.DataFrame:
     if meter_symbol_col not in out.columns:
         out[meter_symbol_col] = ""
     out[meter_symbol_col] = out[meter_symbol_col].map(normalize_meter_id)
-    out["fullMeterID"] = (
+    reconstructed_meter = (
         out[meter_symbol_col].fillna("").astype(str)
         + out["meterNumber"].fillna("").astype(str)
     ).map(normalize_meter_id)
+    if "fullMeterID" in out.columns:
+        supplied_meter = out["fullMeterID"].map(normalize_meter_id)
+        out["fullMeterID"] = supplied_meter.where(supplied_meter.ne(""), reconstructed_meter)
+    else:
+        out["fullMeterID"] = reconstructed_meter
 
     for col in DATE_COLUMNS:
         if col in out.columns:
